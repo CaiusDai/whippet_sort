@@ -1,0 +1,5 @@
+*.parquet
+*.png
+*.json
+__pycache__
+!test_use_config.json

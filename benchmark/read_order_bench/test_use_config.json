@@ -1,0 +1,65 @@
+{
+    "size": 50000,
+    "columns": [
+        {
+            "name": "key",
+            "dtype": "int",
+            "distribution": "unique",
+            "dist_params": {
+                "min": 1,
+                "max": 100000
+            }
+        },
+        {
+            "name": "strDup",
+            "dtype": "str",
+            "distribution": "normal",
+            "cardinality": 10,
+            "compression": "NONE",
+            "encoding": "PLAIN_DICTIONARY",
+            "str_length": [
+                40,
+                50
+            ]
+        },
+        {
+            "name": "intNumDup",
+            "dtype": "int",
+            "distribution": "normal",
+            "cardinality": 10,
+            "num_null": 0,
+            "compression": "NONE",
+            "encoding": "PLAIN_DICTIONARY",
+            "dist_params": {
+                "min": 10,
+                "max": 50000
+            }
+        },
+        {
+            "name": "intNum",
+            "dtype": "int",
+            "distribution": "normal",
+            "cardinality": 10,
+            "num_null": 0,
+            "compression": "NONE",
+            "encoding": "PLAIN_DICTIONARY",
+            "dist_params": {
+                "min": 10,
+                "max": 50000
+            }
+        },
+        {
+            "name": "doubleNum",
+            "dtype": "double",
+            "distribution": "normal",
+            "cardinality": 100,
+            "num_null": 0,
+            "compression": "NONE",
+            "encoding": "BYTE_STREAM_SPLIT",
+            "dist_params": {
+                "min": 10,
+                "max": 50000
+            }
+        }
+    ]
+}
