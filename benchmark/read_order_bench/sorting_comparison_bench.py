@@ -276,17 +276,3 @@ if __name__ == "__main__":
     plt.xticks(num_attr)
     plt.legend()
     plt.savefig("benchmark_key_comparison.png")
-
-    # Create a temp file to store the results
-    # Append <size,name,res>
-    with open("benchmark_key_comparison.json", "w") as f:
-        json.dump(
-            {
-                "size": test_size,
-                "DuckDB": duckdb_res[3],
-                "MonetDB": monetdb_res[3],
-                "ClickHouse": clickhouse_res[3],
-                "SQLite": sqlite_res[3],
-            },
-            f,
-        )
