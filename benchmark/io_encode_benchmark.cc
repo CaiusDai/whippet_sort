@@ -1,36 +1,37 @@
-#include "benchmark/benchmark.h"
+// Copyright 2024 Whippet Sort
+//
+// Licensed under the Apache License, Version 2.0 (the "License"); you may not
+// use this file except in compliance with the License. You may obtain a copy of
+// the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+// WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+// License for the specific language governing permissions and limitations under
+// the License.
 
-#include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
-#include <limits>
 #include <random>
 
-#include "arrow/array.h"
-#include "arrow/array/builder_binary.h"
-#include "arrow/array/builder_dict.h"
-#include "arrow/io/memory.h"
-#include "arrow/testing/gtest_util.h"
-#include "arrow/testing/random.h"
-#include "arrow/testing/util.h"
-#include "arrow/type.h"
-#include "arrow/util/byte_stream_split_internal.h"
-#include "arrow/util/config.h"
-#include "arrow/visit_data_inline.h"
-
-#include "parquet/column_reader.h"
-#include "parquet/column_writer.h"
-#include "parquet/encoding.h"
-#include "parquet/file_reader.h"
-#include "parquet/metadata.h"
-#include "parquet/platform.h"
-#include "parquet/schema.h"
-#include "parquet/thrift_internal.h"
-
-#include "parquet/benchmark_util.h"
+#include <arrow/api.h>
+#include <arrow/io/api.h>
+#include <arrow/testing/random.h>
+#include <benchmark/benchmark.h>
+#include <parquet/benchmark_util.h>
+#include <parquet/column_reader.h>
+#include <parquet/column_writer.h>
+#include <parquet/encoding.h>
+#include <parquet/file_reader.h>
+#include <parquet/metadata.h>
+#include <parquet/platform.h>
+#include <parquet/schema.h>
+#include <parquet/types.h>
 
 using arrow::default_memory_pool;
-using arrow::MemoryPool;
 
 namespace {
 
@@ -53,15 +54,11 @@ using schema::PrimitiveNode;
 
 // Used by File Writing tests
 template <typename WriterType>
-std::shared_ptr<WriterType> BuildWriter(int64_t output_size,
-                                        const std::shared_ptr<ArrowOutputStream>& dst,
-                                        ColumnChunkMetaDataBuilder* metadata,
-                                        ColumnDescriptor* schema,
-                                        const WriterProperties* properties,
-                                        Compression::type codec) {
+std::shared_ptr<WriterType> BuildWriter(int64_t output_size, const std::shared_ptr<ArrowOutputStream> &dst,
+                                        ColumnChunkMetaDataBuilder *metadata, ColumnDescriptor *schema,
+                                        const WriterProperties *properties, Compression::type codec) {
   std::unique_ptr<PageWriter> pager = PageWriter::Open(dst, codec, metadata);
-  std::shared_ptr<ColumnWriter> writer =
-      ColumnWriter::Make(metadata, std::move(pager), properties);
+  std::shared_ptr<ColumnWriter> writer = ColumnWriter::Make(metadata, std::move(pager), properties);
   return std::static_pointer_cast<WriterType>(writer);
 }
 
@@ -104,19 +101,17 @@ static auto ApplyCardinality(int cardinality, std::vector<T> values, int size) {
 
 // Helper functions for Dictionary Encoding
 template <typename Type>
-static void EncodeDict(const std::vector<typename Type::c_type>& values,
-                       ::benchmark::State& state,
+static void EncodeDict(const std::vector<typename Type::c_type> &values, ::benchmark::State &state,
                        std::shared_ptr<ColumnDescriptor> descr) {
   using T = typename Type::c_type;
   int num_values = static_cast<int>(values.size());
 
-  MemoryPool* allocator = default_memory_pool();
+  MemoryPool *allocator = default_memory_pool();
 
   // Note: Encoding input is not used when use_dictionary is set to true
   auto base_encoder = MakeEncoder(Type::type_num, Encoding::RLE_DICTIONARY,
                                   /*use_dictionary=*/true, descr.get(), allocator);
-  auto encoder =
-      dynamic_cast<typename EncodingTraits<Type>::Encoder*>(base_encoder.get());
+  auto encoder = dynamic_cast<typename EncodingTraits<Type>::Encoder *>(base_encoder.get());
   for (auto _ : state) {
     encoder->Put(values.data(), num_values);
     encoder->FlushValues();
@@ -127,38 +122,31 @@ static void EncodeDict(const std::vector<typename Type::c_type>& values,
 }
 
 template <typename Type>
-static void DecodeDict(const std::vector<typename Type::c_type>& values,
-                       ::benchmark::State& state,
+static void DecodeDict(const std::vector<typename Type::c_type> &values, ::benchmark::State &state,
                        std::shared_ptr<ColumnDescriptor> descr) {
   typedef typename Type::c_type T;
   int num_values = static_cast<int>(values.size());
 
-  MemoryPool* allocator = default_memory_pool();
+  MemoryPool *allocator = default_memory_pool();
 
-  auto base_encoder =
-      MakeEncoder(Type::type_num, Encoding::PLAIN, true, descr.get(), allocator);
-  auto encoder =
-      dynamic_cast<typename EncodingTraits<Type>::Encoder*>(base_encoder.get());
-  auto dict_traits = dynamic_cast<DictEncoder<Type>*>(base_encoder.get());
+  auto base_encoder = MakeEncoder(Type::type_num, Encoding::PLAIN, true, descr.get(), allocator);
+  auto encoder = dynamic_cast<typename EncodingTraits<Type>::Encoder *>(base_encoder.get());
+  auto dict_traits = dynamic_cast<DictEncoder<Type> *>(base_encoder.get());
   encoder->Put(values.data(), num_values);
 
-  std::shared_ptr<ResizableBuffer> dict_buffer =
-      AllocateBuffer(allocator, dict_traits->dict_encoded_size());
+  std::shared_ptr<ResizableBuffer> dict_buffer = AllocateBuffer(allocator, dict_traits->dict_encoded_size());
 
-  std::shared_ptr<ResizableBuffer> indices =
-      AllocateBuffer(allocator, encoder->EstimatedDataEncodedSize());
+  std::shared_ptr<ResizableBuffer> indices = AllocateBuffer(allocator, encoder->EstimatedDataEncodedSize());
 
   dict_traits->WriteDict(dict_buffer->mutable_data());
-  int actual_bytes = dict_traits->WriteIndices(indices->mutable_data(),
-                                               static_cast<int>(indices->size()));
+  int actual_bytes = dict_traits->WriteIndices(indices->mutable_data(), static_cast<int>(indices->size()));
 
   PARQUET_THROW_NOT_OK(indices->Resize(actual_bytes));
 
   std::vector<T> decoded_values(num_values);
   for (auto _ : state) {
     auto dict_decoder = MakeTypedDecoder<Type>(Encoding::PLAIN, descr.get());
-    dict_decoder->SetData(dict_traits->num_entries(), dict_buffer->data(),
-                          static_cast<int>(dict_buffer->size()));
+    dict_decoder->SetData(dict_traits->num_entries(), dict_buffer->data(), static_cast<int>(dict_buffer->size()));
 
     auto decoder = MakeDictDecoder<Type>(descr.get());
     decoder->SetDict(dict_decoder.get());
@@ -182,8 +170,7 @@ static auto MakeInt64InputScatter(size_t length, int cardinality) {
   } else {
     // Generate with cardinality
     std::vector<int64_t> values(cardinality);
-    benchmark::GenerateBenchmarkData(cardinality, SEED, values.data(), &heap,
-                                     sizeof(int64_t));
+    benchmark::GenerateBenchmarkData(cardinality, SEED, values.data(), &heap, sizeof(int64_t));
     return ApplyCardinality(cardinality, values, length);
   }
 }
@@ -203,34 +190,11 @@ static auto MakeDoubleInput(size_t length, int cardinality) {
   }
 }
 
-// Bug: Can't correctly compute the bytes processed, which will be used in benchmark
-// This function is not currently in use.
-static auto MakeByteArrayInput(size_t length, int cardinality, int str_min_length,
-                               int str_max_length, int64_t& byte_processed) {
-  ::arrow::random::RandomArrayGenerator rgen(SEED);
-  if (cardinality == 0) {
-    cardinality = length;
-  }
-  auto arrow_array = rgen.String(/* size */ cardinality, /* min_length */ str_min_length,
-                                 /* max_length */ str_max_length,
-                                 /* null_probability */ 0);
-  auto arrow_ba_array = std::static_pointer_cast<::arrow::StringArray>(arrow_array);
-  byte_processed =
-      (arrow_ba_array->value_data()->size() + arrow_ba_array->value_offsets()->size()) *
-      (length / cardinality + length % cardinality);
-  std::vector<ByteArray> values;
-  for (int i = 0; i < arrow_ba_array->length(); ++i) {
-    values.emplace_back(arrow_ba_array->GetView(i));
-  }
-  return ApplyCardinality(cardinality, values, length);
-}
-
 /*******************Encoding Decoding Tests*******************/
 // Int64 Plain Encode Test
 // NumberGenerator: Function that can produce input values
 template <typename NumberGenerator>
-static void BM_PlainEncodingInt64(::benchmark::State& state, NumberGenerator gen,
-                                  int cardinality) {
+static void BM_PlainEncodingInt64(::benchmark::State &state, NumberGenerator gen, int cardinality) {
   std::vector<int64_t> values = gen(state.range(0), cardinality);
   auto encoder = MakeTypedEncoder<Int64Type>(Encoding::PLAIN);
   for (auto _ : state) {
@@ -240,15 +204,15 @@ static void BM_PlainEncodingInt64(::benchmark::State& state, NumberGenerator gen
   state.SetBytesProcessed(state.iterations() * state.range(0) * sizeof(int64_t));
 }
 
-static void BM_PlainEncodingInt64_Narrow(::benchmark::State& state) {
+static void BM_PlainEncodingInt64_Narrow(::benchmark::State &state) {
   BM_PlainEncodingInt64(state, MakeInt64InputScatter, CARD_NARROW);
 }
 
-static void BM_PlainEncodingInt64_Medium(::benchmark::State& state) {
+static void BM_PlainEncodingInt64_Medium(::benchmark::State &state) {
   BM_PlainEncodingInt64(state, MakeInt64InputScatter, CARD_MEDIUM);
 }
 
-static void BM_PlainEncodingInt64_Wide(::benchmark::State& state) {
+static void BM_PlainEncodingInt64_Wide(::benchmark::State &state) {
   BM_PlainEncodingInt64(state, MakeInt64InputScatter, CARD_WIDE);
 }
 
@@ -258,30 +222,28 @@ BENCHMARK(BM_PlainEncodingInt64_Wide)->Range(MIN_RANGE, MAX_RANGE);
 
 // Int64 Decode Test
 template <typename NumberGenerator>
-static void BM_PlainDecodingInt64(::benchmark::State& state, NumberGenerator gen,
-                                  int cardinality) {
+static void BM_PlainDecodingInt64(::benchmark::State &state, NumberGenerator gen, int cardinality) {
   std::vector<int64_t> values = gen(state.range(0), cardinality);
   auto encoder = MakeTypedEncoder<Int64Type>(Encoding::PLAIN);
   encoder->Put(values.data(), static_cast<int>(values.size()));
   std::shared_ptr<Buffer> buf = encoder->FlushValues();
   auto decoder = MakeTypedDecoder<Int64Type>(Encoding::PLAIN);
   for (auto _ : state) {
-    decoder->SetData(static_cast<int>(values.size()), buf->data(),
-                     static_cast<int>(buf->size()));
+    decoder->SetData(static_cast<int>(values.size()), buf->data(), static_cast<int>(buf->size()));
     decoder->Decode(values.data(), static_cast<int>(values.size()));
   }
   state.SetBytesProcessed(state.iterations() * state.range(0) * sizeof(int64_t));
 }
 
-static void BM_PlainDecodingInt64_Narrow(::benchmark::State& state) {
+static void BM_PlainDecodingInt64_Narrow(::benchmark::State &state) {
   BM_PlainDecodingInt64(state, MakeInt64InputScatter, CARD_NARROW);
 }
 
-static void BM_PlainDecodingInt64_Medium(::benchmark::State& state) {
+static void BM_PlainDecodingInt64_Medium(::benchmark::State &state) {
   BM_PlainDecodingInt64(state, MakeInt64InputScatter, CARD_MEDIUM);
 }
 
-static void BM_PlainDecodingInt64_Wide(::benchmark::State& state) {
+static void BM_PlainDecodingInt64_Wide(::benchmark::State &state) {
   BM_PlainDecodingInt64(state, MakeInt64InputScatter, CARD_WIDE);
 }
 BENCHMARK(BM_PlainDecodingInt64_Narrow)->Range(MIN_RANGE, MAX_RANGE);
@@ -290,8 +252,7 @@ BENCHMARK(BM_PlainDecodingInt64_Wide)->Range(MIN_RANGE, MAX_RANGE);
 
 // Int64 Delta Encode Test
 template <typename NumberGenerator>
-static void BM_DeltaBitPackingEncode(::benchmark::State& state, NumberGenerator gen,
-                                     int cardinality) {
+static void BM_DeltaBitPackingEncode(::benchmark::State &state, NumberGenerator gen, int cardinality) {
   std::vector<int64_t> values = gen(state.range(0), cardinality);
   auto encoder = MakeTypedEncoder<Int64Type>(Encoding::DELTA_BINARY_PACKED);
   for (auto _ : state) {
@@ -302,15 +263,15 @@ static void BM_DeltaBitPackingEncode(::benchmark::State& state, NumberGenerator 
   state.SetItemsProcessed(state.iterations() * values.size());
 }
 
-static void BM_DeltaBitPackingEncode_Narrow(::benchmark::State& state) {
+static void BM_DeltaBitPackingEncode_Narrow(::benchmark::State &state) {
   BM_DeltaBitPackingEncode(state, MakeInt64InputScatter, CARD_NARROW);
 }
 
-static void BM_DeltaBitPackingEncode_Medium(::benchmark::State& state) {
+static void BM_DeltaBitPackingEncode_Medium(::benchmark::State &state) {
   BM_DeltaBitPackingEncode(state, MakeInt64InputScatter, CARD_MEDIUM);
 }
 
-static void BM_DeltaBitPackingEncode_Wide(::benchmark::State& state) {
+static void BM_DeltaBitPackingEncode_Wide(::benchmark::State &state) {
   BM_DeltaBitPackingEncode(state, MakeInt64InputScatter, CARD_WIDE);
 }
 
@@ -320,8 +281,7 @@ BENCHMARK(BM_DeltaBitPackingEncode_Wide)->Range(MIN_RANGE, MAX_RANGE);
 
 // Int64 Delta Test Decode Test
 template <typename NumberGenerator>
-static void BM_DeltaBitPackingDecode(::benchmark::State& state, NumberGenerator gen,
-                                     int cardinality) {
+static void BM_DeltaBitPackingDecode(::benchmark::State &state, NumberGenerator gen, int cardinality) {
   std::vector<int64_t> values = gen(state.range(0), cardinality);
   auto encoder = MakeTypedEncoder<Int64Type>(Encoding::DELTA_BINARY_PACKED);
   encoder->Put(values.data(), static_cast<int>(values.size()));
@@ -329,22 +289,21 @@ static void BM_DeltaBitPackingDecode(::benchmark::State& state, NumberGenerator 
 
   auto decoder = MakeTypedDecoder<Int64Type>(Encoding::DELTA_BINARY_PACKED);
   for (auto _ : state) {
-    decoder->SetData(static_cast<int>(values.size()), buf->data(),
-                     static_cast<int>(buf->size()));
+    decoder->SetData(static_cast<int>(values.size()), buf->data(), static_cast<int>(buf->size()));
     decoder->Decode(values.data(), static_cast<int>(values.size()));
   }
   state.SetBytesProcessed(state.iterations() * state.range(0) * sizeof(int64_t));
   state.SetItemsProcessed(state.iterations() * state.range(0));
 }
-static void BM_DeltaBitPackingDecode_Narrow(::benchmark::State& state) {
+static void BM_DeltaBitPackingDecode_Narrow(::benchmark::State &state) {
   BM_DeltaBitPackingDecode(state, MakeInt64InputScatter, CARD_NARROW);
 }
 
-static void BM_DeltaBitPackingDecode_Medium(::benchmark::State& state) {
+static void BM_DeltaBitPackingDecode_Medium(::benchmark::State &state) {
   BM_DeltaBitPackingDecode(state, MakeInt64InputScatter, CARD_MEDIUM);
 }
 
-static void BM_DeltaBitPackingDecode_Wide(::benchmark::State& state) {
+static void BM_DeltaBitPackingDecode_Wide(::benchmark::State &state) {
   BM_DeltaBitPackingDecode(state, MakeInt64InputScatter, CARD_WIDE);
 }
 
@@ -354,26 +313,23 @@ BENCHMARK(BM_DeltaBitPackingDecode_Wide)->Range(MIN_RANGE, MAX_RANGE);
 
 // Int64 Dictionary Encode Test
 template <typename Type, typename NumberGenerator>
-static void BM_DictEncoding(::benchmark::State& state, NumberGenerator gen,
-                            int cardinality, std::shared_ptr<ColumnDescriptor> descr) {
+static void BM_DictEncoding(::benchmark::State &state, NumberGenerator gen, int cardinality,
+                            std::shared_ptr<ColumnDescriptor> descr) {
   using T = typename Type::c_type;
   std::vector<T> values = gen(state.range(0), cardinality);
   EncodeDict<Type>(values, state, descr);
 }
 
-static void BM_DictEncodingInt64_Narrow(::benchmark::State& state) {
-  BM_DictEncoding<Int64Type>(state, MakeInt64InputScatter, CARD_NARROW,
-                             Int64Schema(Repetition::REQUIRED));
+static void BM_DictEncodingInt64_Narrow(::benchmark::State &state) {
+  BM_DictEncoding<Int64Type>(state, MakeInt64InputScatter, CARD_NARROW, Int64Schema(Repetition::REQUIRED));
 }
 
-static void BM_DictEncodingInt64_Medium(::benchmark::State& state) {
-  BM_DictEncoding<Int64Type>(state, MakeInt64InputScatter, CARD_MEDIUM,
-                             Int64Schema(Repetition::REQUIRED));
+static void BM_DictEncodingInt64_Medium(::benchmark::State &state) {
+  BM_DictEncoding<Int64Type>(state, MakeInt64InputScatter, CARD_MEDIUM, Int64Schema(Repetition::REQUIRED));
 }
 
-static void BM_DictEncodingInt64_Wide(::benchmark::State& state) {
-  BM_DictEncoding<Int64Type>(state, MakeInt64InputScatter, CARD_WIDE,
-                             Int64Schema(Repetition::REQUIRED));
+static void BM_DictEncodingInt64_Wide(::benchmark::State &state) {
+  BM_DictEncoding<Int64Type>(state, MakeInt64InputScatter, CARD_WIDE, Int64Schema(Repetition::REQUIRED));
 }
 BENCHMARK(BM_DictEncodingInt64_Narrow)->Range(MIN_RANGE, MAX_RANGE);
 BENCHMARK(BM_DictEncodingInt64_Medium)->Range(MIN_RANGE, MAX_RANGE);
@@ -381,33 +337,30 @@ BENCHMARK(BM_DictEncodingInt64_Wide)->Range(MIN_RANGE, MAX_RANGE);
 
 // Int64 Dictionary Decode Test
 template <typename Type, typename NumberGenerator>
-static void BM_DictDecoding(::benchmark::State& state, NumberGenerator gen,
-                            int cardinality, std::shared_ptr<ColumnDescriptor> descr) {
+static void BM_DictDecoding(::benchmark::State &state, NumberGenerator gen, int cardinality,
+                            std::shared_ptr<ColumnDescriptor> descr) {
   using T = typename Type::c_type;
   std::vector<T> values = gen(state.range(0), cardinality);
   DecodeDict<Type>(values, state, descr);
 }
 
-static void BM_DictDecodingInt64_Narrow(::benchmark::State& state) {
-  BM_DictDecoding<Int64Type>(state, MakeInt64InputScatter, CARD_NARROW,
-                             Int64Schema(Repetition::REQUIRED));
+static void BM_DictDecodingInt64_Narrow(::benchmark::State &state) {
+  BM_DictDecoding<Int64Type>(state, MakeInt64InputScatter, CARD_NARROW, Int64Schema(Repetition::REQUIRED));
 }
 
-static void BM_DictDecodingInt64_Medium(::benchmark::State& state) {
-  BM_DictDecoding<Int64Type>(state, MakeInt64InputScatter, CARD_MEDIUM,
-                             Int64Schema(Repetition::REQUIRED));
+static void BM_DictDecodingInt64_Medium(::benchmark::State &state) {
+  BM_DictDecoding<Int64Type>(state, MakeInt64InputScatter, CARD_MEDIUM, Int64Schema(Repetition::REQUIRED));
 }
 
-static void BM_DictDecodingInt64_Wide(::benchmark::State& state) {
-  BM_DictDecoding<Int64Type>(state, MakeInt64InputScatter, CARD_WIDE,
-                             Int64Schema(Repetition::REQUIRED));
+static void BM_DictDecodingInt64_Wide(::benchmark::State &state) {
+  BM_DictDecoding<Int64Type>(state, MakeInt64InputScatter, CARD_WIDE, Int64Schema(Repetition::REQUIRED));
 }
 BENCHMARK(BM_DictDecodingInt64_Narrow)->Range(MIN_RANGE, MAX_RANGE);
 BENCHMARK(BM_DictDecodingInt64_Medium)->Range(MIN_RANGE, MAX_RANGE);
 BENCHMARK(BM_DictDecodingInt64_Wide)->Range(MIN_RANGE, MAX_RANGE);
 
 // Double Plain Encode Test
-static void BM_PlainEncodingDouble(::benchmark::State& state, int cardinality) {
+static void BM_PlainEncodingDouble(::benchmark::State &state, int cardinality) {
   std::vector<double> values = MakeDoubleInput(state.range(0), cardinality);
   auto encoder = MakeTypedEncoder<DoubleType>(Encoding::PLAIN);
   for (auto _ : state) {
@@ -417,24 +370,18 @@ static void BM_PlainEncodingDouble(::benchmark::State& state, int cardinality) {
   state.SetBytesProcessed(state.iterations() * state.range(0) * sizeof(double));
 }
 
-static void BM_PlainEncodingDouble_Narrow(::benchmark::State& state) {
-  BM_PlainEncodingDouble(state, CARD_NARROW);
-}
+static void BM_PlainEncodingDouble_Narrow(::benchmark::State &state) { BM_PlainEncodingDouble(state, CARD_NARROW); }
 
-static void BM_PlainEncodingDouble_Medium(::benchmark::State& state) {
-  BM_PlainEncodingDouble(state, CARD_MEDIUM);
-}
+static void BM_PlainEncodingDouble_Medium(::benchmark::State &state) { BM_PlainEncodingDouble(state, CARD_MEDIUM); }
 
-static void BM_PlainEncodingDouble_Wide(::benchmark::State& state) {
-  BM_PlainEncodingDouble(state, CARD_WIDE);
-}
+static void BM_PlainEncodingDouble_Wide(::benchmark::State &state) { BM_PlainEncodingDouble(state, CARD_WIDE); }
 
 BENCHMARK(BM_PlainEncodingDouble_Narrow)->Range(MIN_RANGE, MAX_RANGE);
 BENCHMARK(BM_PlainEncodingDouble_Medium)->Range(MIN_RANGE, MAX_RANGE);
 BENCHMARK(BM_PlainEncodingDouble_Wide)->Range(MIN_RANGE, MAX_RANGE);
 
 // Double Plain Decode Test
-static void BM_PlainDecodingDouble(::benchmark::State& state, int cardinality) {
+static void BM_PlainDecodingDouble(::benchmark::State &state, int cardinality) {
   std::vector<double> values = MakeDoubleInput(state.range(0), cardinality);
   auto encoder = MakeTypedEncoder<DoubleType>(Encoding::PLAIN);
   encoder->Put(values.data(), static_cast<int>(values.size()));
@@ -442,138 +389,101 @@ static void BM_PlainDecodingDouble(::benchmark::State& state, int cardinality) {
 
   for (auto _ : state) {
     auto decoder = MakeTypedDecoder<DoubleType>(Encoding::PLAIN);
-    decoder->SetData(static_cast<int>(values.size()), buf->data(),
-                     static_cast<int>(buf->size()));
+    decoder->SetData(static_cast<int>(values.size()), buf->data(), static_cast<int>(buf->size()));
     decoder->Decode(values.data(), static_cast<int>(values.size()));
   }
   state.SetBytesProcessed(state.iterations() * state.range(0) * sizeof(double));
 }
 
-static void BM_PlainDecodingDouble_Narrow(::benchmark::State& state) {
-  BM_PlainDecodingDouble(state, CARD_NARROW);
-}
+static void BM_PlainDecodingDouble_Narrow(::benchmark::State &state) { BM_PlainDecodingDouble(state, CARD_NARROW); }
 
-static void BM_PlainDecodingDouble_Medium(::benchmark::State& state) {
-  BM_PlainDecodingDouble(state, CARD_MEDIUM);
-}
+static void BM_PlainDecodingDouble_Medium(::benchmark::State &state) { BM_PlainDecodingDouble(state, CARD_MEDIUM); }
 
-static void BM_PlainDecodingDouble_Wide(::benchmark::State& state) {
-  BM_PlainDecodingDouble(state, CARD_WIDE);
-}
+static void BM_PlainDecodingDouble_Wide(::benchmark::State &state) { BM_PlainDecodingDouble(state, CARD_WIDE); }
 
 BENCHMARK(BM_PlainDecodingDouble_Narrow)->Range(MIN_RANGE, MAX_RANGE);
 BENCHMARK(BM_PlainDecodingDouble_Medium)->Range(MIN_RANGE, MAX_RANGE);
 BENCHMARK(BM_PlainDecodingDouble_Wide)->Range(MIN_RANGE, MAX_RANGE);
 
 // Double Stream Split Encode Test
-// Note: There are multiple encoding functions for this encoding, thus encode_func
-// parameter is used here, one should pass appropriate encoding function to it.
-// ::arrow::util::internal::ByteStreamSplitEncode is used here. Similar approach is
-// used in decoding test.
-template <typename EncodeFunc>
-static void BM_ByteStreamSplitEncode(::benchmark::State& state, EncodeFunc&& encode_func,
-                                     int cardinality) {
+// Note: There are multiple encoding functions for this encoding, thus
+// encode_func parameter is used here, one should pass appropriate encoding
+// function to it.
+// ::arrow::util::internal::ByteStreamSplitEncode is used here. Similar approach
+// is used in decoding test.
+static void BM_ByteStreamSplitEncode(::benchmark::State &state, int cardinality) {
   std::vector<double> values = MakeDoubleInput(state.range(0), cardinality);
-  const uint8_t* values_raw = reinterpret_cast<const uint8_t*>(values.data());
-  std::vector<uint8_t> output(state.range(0) * sizeof(double));
+  auto encoder = MakeTypedEncoder<DoubleType>(Encoding::BYTE_STREAM_SPLIT);
 
   for (auto _ : state) {
-    encode_func(values_raw, /*width=*/static_cast<int>(sizeof(double)), values.size(),
-                output.data());
-    ::benchmark::ClobberMemory();
+    encoder->Put(values.data(), static_cast<int>(values.size()));
+    std::shared_ptr<Buffer> buf = encoder->FlushValues();
   }
   state.SetBytesProcessed(state.iterations() * values.size() * sizeof(double));
   state.SetItemsProcessed(state.iterations() * values.size());
 }
 
-static void BM_ByteStreamSplitEncode_Narrow(::benchmark::State& state) {
-  BM_ByteStreamSplitEncode(state, ::arrow::util::internal::ByteStreamSplitEncode,
-                           CARD_NARROW);
-}
+static void BM_ByteStreamSplitEncode_Narrow(::benchmark::State &state) { BM_ByteStreamSplitEncode(state, CARD_NARROW); }
 
-static void BM_ByteStreamSplitEncode_Medium(::benchmark::State& state) {
-  BM_ByteStreamSplitEncode(state, ::arrow::util::internal::ByteStreamSplitEncode,
-                           CARD_MEDIUM);
-}
+static void BM_ByteStreamSplitEncode_Medium(::benchmark::State &state) { BM_ByteStreamSplitEncode(state, CARD_MEDIUM); }
 
-static void BM_ByteStreamSplitEncode_Wide(::benchmark::State& state) {
-  BM_ByteStreamSplitEncode(state, ::arrow::util::internal::ByteStreamSplitEncode,
-                           CARD_WIDE);
-}
+static void BM_ByteStreamSplitEncode_Wide(::benchmark::State &state) { BM_ByteStreamSplitEncode(state, CARD_WIDE); }
 
 BENCHMARK(BM_ByteStreamSplitEncode_Narrow)->Range(MIN_RANGE, MAX_RANGE);
 BENCHMARK(BM_ByteStreamSplitEncode_Medium)->Range(MIN_RANGE, MAX_RANGE);
 BENCHMARK(BM_ByteStreamSplitEncode_Wide)->Range(MIN_RANGE, MAX_RANGE);
 
 // Double Split Decode Test
-template <typename DecodeFunc>
-static void BM_ByteStreamSplitDecode(::benchmark::State& state, DecodeFunc&& decode_func,
-                                     int cardinality) {
+static void BM_ByteStreamSplitDecode(::benchmark::State &state, int cardinality) {
   std::vector<double> values = MakeDoubleInput(state.range(0), cardinality);
-  const uint8_t* values_raw = reinterpret_cast<const uint8_t*>(values.data());
-  std::vector<double> output(state.range(0));
+  auto size = static_cast<int>(values.size());
+  auto encoder = MakeTypedEncoder<DoubleType>(Encoding::BYTE_STREAM_SPLIT);
+  encoder->Put(values.data(), size);
+  auto buf = encoder->FlushValues();
+  auto decoder = MakeTypedDecoder<DoubleType>(Encoding::BYTE_STREAM_SPLIT);
 
   for (auto _ : state) {
-    decode_func(values_raw,
-                /*width=*/static_cast<int>(sizeof(double)),
-                /*num_values=*/static_cast<int64_t>(values.size()),
-                /*stride=*/static_cast<int64_t>(values.size()),
-                reinterpret_cast<uint8_t*>(output.data()));
-    ::benchmark::ClobberMemory();
+    decoder->SetData(size, buf->data(), buf->size());
+    decoder->Decode(values.data(), size);
   }
   state.SetBytesProcessed(state.iterations() * values.size() * sizeof(double));
   state.SetItemsProcessed(state.iterations() * values.size());
 }
 
-static void BM_ByteStreamSplitDecode_Narrow(::benchmark::State& state) {
-  BM_ByteStreamSplitDecode(state, ::arrow::util::internal::ByteStreamSplitDecode,
-                           CARD_NARROW);
-}
+static void BM_ByteStreamSplitDecode_Narrow(::benchmark::State &state) { BM_ByteStreamSplitDecode(state, CARD_NARROW); }
 
-static void BM_ByteStreamSplitDecode_Medium(::benchmark::State& state) {
-  BM_ByteStreamSplitDecode(state, ::arrow::util::internal::ByteStreamSplitDecode,
-                           CARD_MEDIUM);
-}
+static void BM_ByteStreamSplitDecode_Medium(::benchmark::State &state) { BM_ByteStreamSplitDecode(state, CARD_MEDIUM); }
 
-static void BM_ByteStreamSplitDecode_Wide(::benchmark::State& state) {
-  BM_ByteStreamSplitDecode(state, ::arrow::util::internal::ByteStreamSplitDecode,
-                           CARD_WIDE);
-}
+static void BM_ByteStreamSplitDecode_Wide(::benchmark::State &state) { BM_ByteStreamSplitDecode(state, CARD_WIDE); }
 
 BENCHMARK(BM_ByteStreamSplitDecode_Narrow)->Range(MIN_RANGE, MAX_RANGE);
 BENCHMARK(BM_ByteStreamSplitDecode_Medium)->Range(MIN_RANGE, MAX_RANGE);
 BENCHMARK(BM_ByteStreamSplitDecode_Wide)->Range(MIN_RANGE, MAX_RANGE);
 
 // Double Dictionary Encode Test
-static void BM_DictEncodingDouble_Narrow(::benchmark::State& state) {
-  BM_DictEncoding<DoubleType>(state, MakeDoubleInput, CARD_NARROW,
-                              DoubleSchema(Repetition::REQUIRED));
+static void BM_DictEncodingDouble_Narrow(::benchmark::State &state) {
+  BM_DictEncoding<DoubleType>(state, MakeDoubleInput, CARD_NARROW, DoubleSchema(Repetition::REQUIRED));
 }
 
-static void BM_DictEncodingDouble_Medium(::benchmark::State& state) {
-  BM_DictEncoding<DoubleType>(state, MakeDoubleInput, CARD_MEDIUM,
-                              DoubleSchema(Repetition::REQUIRED));
+static void BM_DictEncodingDouble_Medium(::benchmark::State &state) {
+  BM_DictEncoding<DoubleType>(state, MakeDoubleInput, CARD_MEDIUM, DoubleSchema(Repetition::REQUIRED));
 }
 
-static void BM_DictEncodingDouble_Wide(::benchmark::State& state) {
-  BM_DictEncoding<DoubleType>(state, MakeDoubleInput, CARD_WIDE,
-                              DoubleSchema(Repetition::REQUIRED));
+static void BM_DictEncodingDouble_Wide(::benchmark::State &state) {
+  BM_DictEncoding<DoubleType>(state, MakeDoubleInput, CARD_WIDE, DoubleSchema(Repetition::REQUIRED));
 }
 
 // Double Dict Decode Test
-static void BM_DictDecodingDouble_Narrow(::benchmark::State& state) {
-  BM_DictDecoding<DoubleType>(state, MakeDoubleInput, CARD_NARROW,
-                              DoubleSchema(Repetition::REQUIRED));
+static void BM_DictDecodingDouble_Narrow(::benchmark::State &state) {
+  BM_DictDecoding<DoubleType>(state, MakeDoubleInput, CARD_NARROW, DoubleSchema(Repetition::REQUIRED));
 }
 
-static void BM_DictDecodingDouble_Medium(::benchmark::State& state) {
-  BM_DictDecoding<DoubleType>(state, MakeDoubleInput, CARD_MEDIUM,
-                              DoubleSchema(Repetition::REQUIRED));
+static void BM_DictDecodingDouble_Medium(::benchmark::State &state) {
+  BM_DictDecoding<DoubleType>(state, MakeDoubleInput, CARD_MEDIUM, DoubleSchema(Repetition::REQUIRED));
 }
 
-static void BM_DictDecodingDouble_Wide(::benchmark::State& state) {
-  BM_DictDecoding<DoubleType>(state, MakeDoubleInput, CARD_WIDE,
-                              DoubleSchema(Repetition::REQUIRED));
+static void BM_DictDecodingDouble_Wide(::benchmark::State &state) {
+  BM_DictDecoding<DoubleType>(state, MakeDoubleInput, CARD_WIDE, DoubleSchema(Repetition::REQUIRED));
 }
 BENCHMARK(BM_DictEncodingDouble_Narrow)->Range(MIN_RANGE, MAX_RANGE);
 BENCHMARK(BM_DictEncodingDouble_Medium)->Range(MIN_RANGE, MAX_RANGE);
@@ -587,7 +497,7 @@ BENCHMARK(BM_DictDecodingDouble_Wide)->Range(MIN_RANGE, MAX_RANGE);
 // Dictionary Encoding needs to handle separately since dictionary encoding
 // might turn back to other encoding when page becomes too large. We need to
 // explicitly use dictionary encoder.
-void EncodingByteArrayBenchmark(::benchmark::State& state, Encoding::type encoding) {
+void EncodingByteArrayBenchmark(::benchmark::State &state, Encoding::type encoding) {
   ::arrow::random::RandomArrayGenerator rag(SEED);
   // Using arrow generator to generate random data.
   int32_t min_length = static_cast<int32_t>(state.range(0));
@@ -596,8 +506,7 @@ void EncodingByteArrayBenchmark(::benchmark::State& state, Encoding::type encodi
   auto array = rag.String(/* size */ array_size, /* min_length */ min_length,
                           /* max_length */ max_length,
                           /* null_probability */ 0);
-  const auto array_actual =
-      ::arrow::internal::checked_pointer_cast<::arrow::StringArray>(array);
+  const auto array_actual = ::arrow::internal::checked_pointer_cast<::arrow::StringArray>(array);
   auto encoder = MakeTypedEncoder<ByteArrayType>(encoding);
   std::vector<ByteArray> values;
   for (int i = 0; i < array_actual->length(); ++i) {
@@ -609,20 +518,18 @@ void EncodingByteArrayBenchmark(::benchmark::State& state, Encoding::type encodi
     encoder->FlushValues();
   }
   state.SetItemsProcessed(state.iterations() * array_actual->length());
-  state.SetBytesProcessed(state.iterations() * (array_actual->value_data()->size() +
-                                                array_actual->value_offsets()->size()));
+  state.SetBytesProcessed(state.iterations() *
+                          (array_actual->value_data()->size() + array_actual->value_offsets()->size()));
 }
 
-static void BM_DeltaLengthEncodingByteArray(::benchmark::State& state) {
+static void BM_DeltaLengthEncodingByteArray(::benchmark::State &state) {
   EncodingByteArrayBenchmark(state, Encoding::DELTA_LENGTH_BYTE_ARRAY);
 }
 
-static void BM_PlainEncodingByteArray(::benchmark::State& state) {
-  EncodingByteArrayBenchmark(state, Encoding::PLAIN);
-}
+static void BM_PlainEncodingByteArray(::benchmark::State &state) { EncodingByteArrayBenchmark(state, Encoding::PLAIN); }
 
 // For Dictionary Encoding
-static void BM_DictEncodingByteArray(::benchmark::State& state) {
+static void BM_DictEncodingByteArray(::benchmark::State &state) {
   ::arrow::random::RandomArrayGenerator rag(SEED);
   // Using arrow generator to generate random data.
   int32_t min_length = static_cast<int32_t>(state.range(0));
@@ -631,8 +538,7 @@ static void BM_DictEncodingByteArray(::benchmark::State& state) {
   auto array = rag.String(/* size */ array_size, /* min_length */ min_length,
                           /* max_length */ max_length,
                           /* null_probability */ 0);
-  const auto array_actual =
-      ::arrow::internal::checked_pointer_cast<::arrow::StringArray>(array);
+  const auto array_actual = ::arrow::internal::checked_pointer_cast<::arrow::StringArray>(array);
   auto encoder = MakeDictDecoder<ByteArrayType>();
   std::vector<ByteArray> values;
   for (int i = 0; i < array_actual->length(); ++i) {
@@ -640,8 +546,8 @@ static void BM_DictEncodingByteArray(::benchmark::State& state) {
   }
   EncodeDict<ByteArrayType>(values, state, ByteArraySchema(Repetition::REQUIRED));
   state.SetItemsProcessed(state.iterations() * array_actual->length());
-  state.SetBytesProcessed(state.iterations() * (array_actual->value_data()->size() +
-                                                array_actual->value_offsets()->size()));
+  state.SetBytesProcessed(state.iterations() *
+                          (array_actual->value_data()->size() + array_actual->value_offsets()->size()));
 }
 
 BENCHMARK(BM_DictEncodingByteArray)->Args({10, 20, MAX_RANGE});
@@ -651,7 +557,7 @@ BENCHMARK(BM_DeltaLengthEncodingByteArray)->Args({10, 20, MAX_RANGE});
 BENCHMARK(BM_DeltaLengthEncodingByteArray)->Args({100, 200, MAX_RANGE});
 
 // Byte Array Decoding Benchmarks
-void DecodingByteArrayBenchmark(::benchmark::State& state, Encoding::type encoding) {
+void DecodingByteArrayBenchmark(::benchmark::State &state, Encoding::type encoding) {
   ::arrow::random::RandomArrayGenerator rag(SEED);
   int32_t min_length = static_cast<int32_t>(state.range(0));
   int32_t max_length = static_cast<int32_t>(state.range(1));
@@ -660,8 +566,7 @@ void DecodingByteArrayBenchmark(::benchmark::State& state, Encoding::type encodi
   auto array = rag.String(/* size */ array_size, /* min_length */ min_length,
                           /* max_length */ max_length,
                           /* null_probability */ 0);
-  const auto array_actual =
-      ::arrow::internal::checked_pointer_cast<::arrow::StringArray>(array);
+  const auto array_actual = ::arrow::internal::checked_pointer_cast<::arrow::StringArray>(array);
   auto encoder = MakeTypedEncoder<ByteArrayType>(encoding);
   encoder->Put(*array);
   std::shared_ptr<Buffer> buf = encoder->FlushValues();
@@ -670,25 +575,22 @@ void DecodingByteArrayBenchmark(::benchmark::State& state, Encoding::type encodi
   values.resize(array->length());
   for (auto _ : state) {
     auto decoder = MakeTypedDecoder<ByteArrayType>(encoding);
-    decoder->SetData(static_cast<int>(array->length()), buf->data(),
-                     static_cast<int>(buf->size()));
+    decoder->SetData(static_cast<int>(array->length()), buf->data(), static_cast<int>(buf->size()));
     decoder->Decode(values.data(), static_cast<int>(values.size()));
     ::benchmark::DoNotOptimize(values);
   }
   state.SetItemsProcessed(state.iterations() * array->length());
-  state.SetBytesProcessed(state.iterations() * (array_actual->value_data()->size() +
-                                                array_actual->value_offsets()->size()));
+  state.SetBytesProcessed(state.iterations() *
+                          (array_actual->value_data()->size() + array_actual->value_offsets()->size()));
 }
 
-static void BM_PlainDecodingByteArray(::benchmark::State& state) {
-  DecodingByteArrayBenchmark(state, Encoding::PLAIN);
-}
+static void BM_PlainDecodingByteArray(::benchmark::State &state) { DecodingByteArrayBenchmark(state, Encoding::PLAIN); }
 
-static void BM_DeltaLengthDecodingByteArray(::benchmark::State& state) {
+static void BM_DeltaLengthDecodingByteArray(::benchmark::State &state) {
   DecodingByteArrayBenchmark(state, Encoding::DELTA_LENGTH_BYTE_ARRAY);
 }
 
-static void BM_DictDecodingByteArray(::benchmark::State& state) {
+static void BM_DictDecodingByteArray(::benchmark::State &state) {
   ::arrow::random::RandomArrayGenerator rag(SEED);
   // Using arrow generator to generate random data.
   int32_t min_length = static_cast<int32_t>(state.range(0));
@@ -697,8 +599,7 @@ static void BM_DictDecodingByteArray(::benchmark::State& state) {
   auto array = rag.String(/* size */ array_size, /* min_length */ min_length,
                           /* max_length */ max_length,
                           /* null_probability */ 0);
-  const auto array_actual =
-      ::arrow::internal::checked_pointer_cast<::arrow::StringArray>(array);
+  const auto array_actual = ::arrow::internal::checked_pointer_cast<::arrow::StringArray>(array);
   auto encoder = MakeDictDecoder<ByteArrayType>();
   std::vector<ByteArray> values;
   for (int i = 0; i < array_actual->length(); ++i) {
@@ -708,8 +609,8 @@ static void BM_DictDecodingByteArray(::benchmark::State& state) {
   ;
 
   state.SetItemsProcessed(state.iterations() * array_actual->length());
-  state.SetBytesProcessed(state.iterations() * (array_actual->value_data()->size() +
-                                                array_actual->value_offsets()->size()));
+  state.SetBytesProcessed(state.iterations() *
+                          (array_actual->value_data()->size() + array_actual->value_offsets()->size()));
 }
 
 BENCHMARK(BM_PlainDecodingByteArray)->Args({10, 20, MAX_RANGE});
@@ -728,7 +629,7 @@ struct DeltaByteArrayState {
   double prefixed_probability;
   std::vector<uint8_t> buf;
 
-  explicit DeltaByteArrayState(const ::benchmark::State& state)
+  explicit DeltaByteArrayState(const ::benchmark::State &state)
       : max_size(static_cast<int32_t>(state.range(0))),
         array_length(static_cast<int32_t>(state.range(1))),
         prefixed_probability(state.range(2) / 100.0) {}
@@ -754,8 +655,7 @@ struct DeltaByteArrayState {
       int prefix_len = 0;
       if (do_prefix) {
         int max_prefix_len = std::min(len, static_cast<int>(out[i - 1].len));
-        prefix_len =
-            static_cast<int>(std::ceil(max_prefix_len * dist_prefix_length(gen)));
+        prefix_len = static_cast<int>(std::ceil(max_prefix_len * dist_prefix_length(gen)));
       }
       for (int j = 0; j < prefix_len; ++j) {
         buf_ptr[j] = out[i - 1].ptr[j];
@@ -770,13 +670,12 @@ struct DeltaByteArrayState {
   }
 };
 
-static void BM_DeltaEncodingByteArray(::benchmark::State& state) {
+static void BM_DeltaEncodingByteArray(::benchmark::State &state) {
   DeltaByteArrayState delta_state(state);
   std::vector<ByteArray> values = delta_state.MakeRandomByteArray(/*seed=*/42);
 
   auto encoder = MakeTypedEncoder<ByteArrayType>(Encoding::DELTA_BYTE_ARRAY);
-  const int64_t plain_encoded_size =
-      delta_state.total_data_size + 4 * delta_state.array_length;
+  const int64_t plain_encoded_size = delta_state.total_data_size + 4 * delta_state.array_length;
   int64_t encoded_size = 0;
 
   for (auto _ : state) {
@@ -785,11 +684,10 @@ static void BM_DeltaEncodingByteArray(::benchmark::State& state) {
   }
   state.SetItemsProcessed(state.iterations() * delta_state.array_length);
   state.SetBytesProcessed(state.iterations() * delta_state.total_data_size);
-  state.counters["compression_ratio"] =
-      static_cast<double>(plain_encoded_size) / encoded_size;
+  state.counters["compression_ratio"] = static_cast<double>(plain_encoded_size) / encoded_size;
 }
 
-static void BM_DeltaDecodingByteArray(::benchmark::State& state) {
+static void BM_DeltaDecodingByteArray(::benchmark::State &state) {
   DeltaByteArrayState delta_state(state);
   std::vector<ByteArray> values = delta_state.MakeRandomByteArray(/*seed=*/42);
 
@@ -797,24 +695,21 @@ static void BM_DeltaDecodingByteArray(::benchmark::State& state) {
   encoder->Put(values.data(), static_cast<int>(values.size()));
   std::shared_ptr<Buffer> buf = encoder->FlushValues();
 
-  const int64_t plain_encoded_size =
-      delta_state.total_data_size + 4 * delta_state.array_length;
+  const int64_t plain_encoded_size = delta_state.total_data_size + 4 * delta_state.array_length;
   const int64_t encoded_size = buf->size();
 
   auto decoder = MakeTypedDecoder<ByteArrayType>(Encoding::DELTA_BYTE_ARRAY);
   for (auto _ : state) {
-    decoder->SetData(delta_state.array_length, buf->data(),
-                     static_cast<int>(buf->size()));
+    decoder->SetData(delta_state.array_length, buf->data(), static_cast<int>(buf->size()));
     decoder->Decode(values.data(), static_cast<int>(values.size()));
     ::benchmark::DoNotOptimize(values);
   }
   state.SetItemsProcessed(state.iterations() * delta_state.array_length);
   state.SetBytesProcessed(state.iterations() * delta_state.total_data_size);
-  state.counters["compression_ratio"] =
-      static_cast<double>(plain_encoded_size) / encoded_size;
+  state.counters["compression_ratio"] = static_cast<double>(plain_encoded_size) / encoded_size;
 }
 
-static void ByteArrayDeltaCustomArguments(::benchmark::internal::Benchmark* b) {
+static void ByteArrayDeltaCustomArguments(::benchmark::internal::Benchmark *b) {
   for (int max_string_length : {8, 64, 1024}) {
     for (int batch_size : {512, 2048}) {
       for (int prefixed_percent : {10, 90, 99}) {
@@ -832,7 +727,7 @@ BENCHMARK(BM_DeltaDecodingByteArray)->Apply(ByteArrayDeltaCustomArguments);
 
 // Int64 Writing Tests
 // Currently only REQUIRED is tested.
-void SetBytesProcessed(::benchmark::State& state, Repetition::type repetition) {
+void SetBytesProcessed(::benchmark::State &state, Repetition::type repetition) {
   int64_t num_values = state.iterations() * state.range(0);
   int64_t bytes_processed = num_values * sizeof(int64_t);
   if (repetition != Repetition::REQUIRED) {
@@ -844,12 +739,10 @@ void SetBytesProcessed(::benchmark::State& state, Repetition::type repetition) {
   state.SetBytesProcessed(bytes_processed);
   state.SetItemsProcessed(num_values);
 }
+
 template <typename WriterType, typename Type, typename NumberGenerator>
-static void BM_WriteColumn(::benchmark::State& state, Compression::type codec,
-                           Encoding::type encoding, int cardinality, bool use_dict,
-                           NumberGenerator gen,
-                           std::shared_ptr<parquet::ColumnDescriptor> schema) {
-  format::ColumnChunk thrift_metadata;
+static void BM_WriteColumn(::benchmark::State &state, Compression::type codec, Encoding::type encoding, int cardinality,
+                           bool use_dict, NumberGenerator gen, std::shared_ptr<parquet::ColumnDescriptor> schema) {
   using T = typename Type::c_type;
   auto input_values = gen(state.range(0), cardinality);
 
@@ -857,34 +750,26 @@ static void BM_WriteColumn(::benchmark::State& state, Compression::type codec,
   std::vector<int16_t> repetition_levels(state.range(0), 0);
   std::shared_ptr<WriterProperties> properties;
   if (use_dict) {
-    properties =
-        WriterProperties::Builder().compression(codec)->encoding(encoding)->build();
+    properties = WriterProperties::Builder().compression(codec)->encoding(encoding)->build();
   } else {
-    properties = WriterProperties::Builder()
-                     .compression(codec)
-                     ->encoding(encoding)
-                     ->disable_dictionary()
-                     ->build();
+    properties = WriterProperties::Builder().compression(codec)->encoding(encoding)->disable_dictionary()->build();
   }
-  auto metadata = ColumnChunkMetaDataBuilder::Make(
-      properties, schema.get(), reinterpret_cast<uint8_t*>(&thrift_metadata));
+  auto metadata = ColumnChunkMetaDataBuilder::Make(properties, schema.get());
 
   int64_t data_size = input_values.size() * sizeof(T);
   int64_t stream_size = 0;
   for (auto _ : state) {
     // Clear the filesystem cache (requires root access)
-    auto code = system("echo 1 | sudo tee /proc/sys/vm/drop_caches > /dev/null");
+    system("echo 1 | sudo tee /proc/sys/vm/drop_caches > /dev/null");
     auto start = std::chrono::high_resolution_clock::now();
     auto stream = CreateOutputStream();
-    std::shared_ptr<WriterType> writer = BuildWriter<WriterType>(
-        state.range(0), stream, metadata.get(), schema.get(), properties.get(), codec);
-    writer->WriteBatch(input_values.size(), definition_levels.data(),
-                       repetition_levels.data(), input_values.data());
+    std::shared_ptr<WriterType> writer =
+        BuildWriter<WriterType>(state.range(0), stream, metadata.get(), schema.get(), properties.get(), codec);
+    writer->WriteBatch(input_values.size(), definition_levels.data(), repetition_levels.data(), input_values.data());
     writer->Close();
     stream_size = stream->Tell().ValueOrDie();
     auto end = std::chrono::high_resolution_clock::now();
-    auto elapsed_seconds =
-        std::chrono::duration_cast<std::chrono::duration<double>>(end - start);
+    auto elapsed_seconds = std::chrono::duration_cast<std::chrono::duration<double>>(end - start);
     state.SetIterationTime(elapsed_seconds.count());
   }
   SetBytesProcessed(state, Repetition::REQUIRED);
@@ -892,22 +777,15 @@ static void BM_WriteColumn(::benchmark::State& state, Compression::type codec,
 }
 
 template <const int cardinality, Encoding::type encoding, bool use_dict>
-static void BM_WriteInt64Column(::benchmark::State& state) {
-  BM_WriteColumn<Int64Writer, Int64Type>(state, Compression::UNCOMPRESSED, encoding,
-                                         cardinality, use_dict, MakeInt64InputScatter,
-                                         Int64Schema(Repetition::REQUIRED));
+static void BM_WriteInt64Column(::benchmark::State &state) {
+  BM_WriteColumn<Int64Writer, Int64Type>(state, Compression::UNCOMPRESSED, encoding, cardinality, use_dict,
+                                         MakeInt64InputScatter, Int64Schema(Repetition::REQUIRED));
 }
 
 // Int64 Plain  Write Test
-BENCHMARK_TEMPLATE(BM_WriteInt64Column, CARD_NARROW, Encoding::PLAIN, false)
-    ->Arg(MAX_RANGE)
-    ->UseManualTime();
-BENCHMARK_TEMPLATE(BM_WriteInt64Column, CARD_MEDIUM, Encoding::PLAIN, false)
-    ->Arg(MAX_RANGE)
-    ->UseManualTime();
-BENCHMARK_TEMPLATE(BM_WriteInt64Column, CARD_WIDE, Encoding::PLAIN, false)
-    ->Arg(MAX_RANGE)
-    ->UseManualTime();
+BENCHMARK_TEMPLATE(BM_WriteInt64Column, CARD_NARROW, Encoding::PLAIN, false)->Arg(MAX_RANGE)->UseManualTime();
+BENCHMARK_TEMPLATE(BM_WriteInt64Column, CARD_MEDIUM, Encoding::PLAIN, false)->Arg(MAX_RANGE)->UseManualTime();
+BENCHMARK_TEMPLATE(BM_WriteInt64Column, CARD_WIDE, Encoding::PLAIN, false)->Arg(MAX_RANGE)->UseManualTime();
 // Int64 Delta Write Tests
 BENCHMARK_TEMPLATE(BM_WriteInt64Column, CARD_NARROW, Encoding::DELTA_BINARY_PACKED, false)
     ->Arg(MAX_RANGE)
@@ -919,62 +797,45 @@ BENCHMARK_TEMPLATE(BM_WriteInt64Column, CARD_WIDE, Encoding::DELTA_BINARY_PACKED
     ->Arg(MAX_RANGE)
     ->UseManualTime();
 // Int64 Dictionary Write Tests
-BENCHMARK_TEMPLATE(BM_WriteInt64Column, CARD_NARROW, Encoding::PLAIN, true)
-    ->Arg(MAX_RANGE)
-    ->UseManualTime();
-BENCHMARK_TEMPLATE(BM_WriteInt64Column, CARD_MEDIUM, Encoding::PLAIN, true)
-    ->Arg(MAX_RANGE)
-    ->UseManualTime();
-BENCHMARK_TEMPLATE(BM_WriteInt64Column, CARD_WIDE, Encoding::PLAIN, true)
-    ->Arg(MAX_RANGE)
-    ->UseManualTime();
+BENCHMARK_TEMPLATE(BM_WriteInt64Column, CARD_NARROW, Encoding::PLAIN, true)->Arg(MAX_RANGE)->UseManualTime();
+BENCHMARK_TEMPLATE(BM_WriteInt64Column, CARD_MEDIUM, Encoding::PLAIN, true)->Arg(MAX_RANGE)->UseManualTime();
+BENCHMARK_TEMPLATE(BM_WriteInt64Column, CARD_WIDE, Encoding::PLAIN, true)->Arg(MAX_RANGE)->UseManualTime();
 
 // Int64 Reading Test
 
 // Used by File Reading tests
 template <typename ReadType>
-std::shared_ptr<ReadType> BuildReader(std::shared_ptr<Buffer>& buffer, int64_t num_values,
-                                      Compression::type codec, ColumnDescriptor* schema) {
+std::shared_ptr<ReadType> BuildReader(std::shared_ptr<Buffer> &buffer, int64_t num_values, Compression::type codec,
+                                      ColumnDescriptor *schema) {
   auto source = std::make_shared<::arrow::io::BufferReader>(buffer);
   std::unique_ptr<PageReader> page_reader = PageReader::Open(source, num_values, codec);
-  return std::static_pointer_cast<ReadType>(
-      ColumnReader::Make(schema, std::move(page_reader)));
+  return std::static_pointer_cast<ReadType>(ColumnReader::Make(schema, std::move(page_reader)));
 }
 
-template <typename WriterType, typename ReaderType, typename Type,
-          typename NumberGenerator>
-static void BM_ReadColumn(::benchmark::State& state, Compression::type codec,
-                          Encoding::type encoding, NumberGenerator gen, int cardinality,
-                          bool use_dict,
+template <typename WriterType, typename ReaderType, typename Type, typename NumberGenerator>
+static void BM_ReadColumn(::benchmark::State &state, Compression::type codec, Encoding::type encoding,
+                          NumberGenerator gen, int cardinality, bool use_dict,
                           std::shared_ptr<parquet::ColumnDescriptor> schema) {
   using T = typename Type::c_type;
-  format::ColumnChunk thrift_metadata;
 
-  const auto& input_values = gen(state.range(0), cardinality);
+  const auto &input_values = gen(state.range(0), cardinality);
 
   std::vector<int16_t> definition_levels(state.range(0), 1);
   std::vector<int16_t> repetition_levels(state.range(0), 0);
   std::shared_ptr<WriterProperties> properties;
   if (use_dict) {
     // Dictionary is enabled by default
-    properties =
-        WriterProperties::Builder().compression(codec)->encoding(encoding)->build();
+    properties = WriterProperties::Builder().compression(codec)->encoding(encoding)->build();
   } else {
-    properties = WriterProperties::Builder()
-                     .compression(codec)
-                     ->encoding(encoding)
-                     ->disable_dictionary()
-                     ->build();
+    properties = WriterProperties::Builder().compression(codec)->encoding(encoding)->disable_dictionary()->build();
   }
 
-  auto metadata = ColumnChunkMetaDataBuilder::Make(
-      properties, schema.get(), reinterpret_cast<uint8_t*>(&thrift_metadata));
+  auto metadata = ColumnChunkMetaDataBuilder::Make(properties, schema.get());
 
   auto stream = CreateOutputStream();
-  std::shared_ptr<WriterType> writer = BuildWriter<WriterType>(
-      state.range(0), stream, metadata.get(), schema.get(), properties.get(), codec);
-  writer->WriteBatch(input_values.size(), definition_levels.data(),
-                     repetition_levels.data(), input_values.data());
+  std::shared_ptr<WriterType> writer =
+      BuildWriter<WriterType>(state.range(0), stream, metadata.get(), schema.get(), properties.get(), codec);
+  writer->WriteBatch(input_values.size(), definition_levels.data(), repetition_levels.data(), input_values.data());
   writer->Close();
 
   PARQUET_ASSIGN_OR_THROW(auto src, stream->Finish());
@@ -986,18 +847,16 @@ static void BM_ReadColumn(::benchmark::State& state, Compression::type codec,
   std::vector<int16_t> repetition_levels_out(state.range(1));
   for (auto _ : state) {
     // Drop cache
-    auto code = system("echo 1 | sudo tee /proc/sys/vm/drop_caches > /dev/null");
+    system("echo 1 | sudo tee /proc/sys/vm/drop_caches > /dev/null");
     auto start = std::chrono::high_resolution_clock::now();
-    std::shared_ptr<ReaderType> reader =
-        BuildReader<ReaderType>(src, state.range(1), codec, schema.get());
+    std::shared_ptr<ReaderType> reader = BuildReader<ReaderType>(src, state.range(1), codec, schema.get());
     int64_t values_read = 0;
     for (size_t i = 0; i < input_values.size(); i += values_read) {
-      reader->ReadBatch(values_out.size(), definition_levels_out.data(),
-                        repetition_levels_out.data(), values_out.data(), &values_read);
+      reader->ReadBatch(values_out.size(), definition_levels_out.data(), repetition_levels_out.data(),
+                        values_out.data(), &values_read);
     }
     auto end = std::chrono::high_resolution_clock::now();
-    auto elapsed_seconds =
-        std::chrono::duration_cast<std::chrono::duration<double>>(end - start);
+    auto elapsed_seconds = std::chrono::duration_cast<std::chrono::duration<double>>(end - start);
     state.SetIterationTime(elapsed_seconds.count());
   }
   SetBytesProcessed(state, Repetition::REQUIRED);
@@ -1005,13 +864,13 @@ static void BM_ReadColumn(::benchmark::State& state, Compression::type codec,
 }
 
 template <const int cardinality, Encoding::type encoding, bool use_dict>
-static void BM_ReadInt64Column(::benchmark::State& state) {
-  BM_ReadColumn<Int64Writer, Int64Reader, Int64Type>(
-      state, Compression::UNCOMPRESSED, encoding, MakeInt64InputScatter, cardinality,
-      use_dict, Int64Schema(Repetition::REQUIRED));
+static void BM_ReadInt64Column(::benchmark::State &state) {
+  BM_ReadColumn<Int64Writer, Int64Reader, Int64Type>(state, Compression::UNCOMPRESSED, encoding, MakeInt64InputScatter,
+                                                     cardinality, use_dict, Int64Schema(Repetition::REQUIRED));
 }
 
-// Int64 Plain Read: First argument is the input size and the second argument is read size
+// Int64 Plain Read: First argument is the input size and the second argument is
+// read size
 BENCHMARK_TEMPLATE(BM_ReadInt64Column, CARD_NARROW, Encoding::PLAIN, false)
     ->Args({MAX_RANGE, MAX_RANGE})
     ->UseManualTime();
@@ -1038,30 +897,21 @@ BENCHMARK_TEMPLATE(BM_ReadInt64Column, CARD_NARROW, Encoding::PLAIN, true)
 BENCHMARK_TEMPLATE(BM_ReadInt64Column, CARD_MEDIUM, Encoding::PLAIN, true)
     ->Args({MAX_RANGE, MAX_RANGE})
     ->UseManualTime();
-BENCHMARK_TEMPLATE(BM_ReadInt64Column, CARD_WIDE, Encoding::PLAIN, true)
-    ->Args({MAX_RANGE, MAX_RANGE})
-    ->UseManualTime();
+BENCHMARK_TEMPLATE(BM_ReadInt64Column, CARD_WIDE, Encoding::PLAIN, true)->Args({MAX_RANGE, MAX_RANGE})->UseManualTime();
 
 // Double Writing test
 template <const int cardinality, Encoding::type encoding, bool use_dict>
-static void BM_WriteDoubleColumn(::benchmark::State& state) {
-  BM_WriteColumn<DoubleWriter, DoubleType>(state, Compression::UNCOMPRESSED, encoding,
-                                           cardinality, use_dict, MakeDoubleInput,
-                                           DoubleSchema(Repetition::REQUIRED));
+static void BM_WriteDoubleColumn(::benchmark::State &state) {
+  BM_WriteColumn<DoubleWriter, DoubleType>(state, Compression::UNCOMPRESSED, encoding, cardinality, use_dict,
+                                           MakeDoubleInput, DoubleSchema(Repetition::REQUIRED));
 }
 
 // Double Plain Write Test
-BENCHMARK_TEMPLATE(BM_WriteDoubleColumn, CARD_NARROW, Encoding::PLAIN, false)
-    ->Arg(MAX_RANGE)
-    ->UseManualTime();
+BENCHMARK_TEMPLATE(BM_WriteDoubleColumn, CARD_NARROW, Encoding::PLAIN, false)->Arg(MAX_RANGE)->UseManualTime();
 
-BENCHMARK_TEMPLATE(BM_WriteDoubleColumn, CARD_MEDIUM, Encoding::PLAIN, false)
-    ->Arg(MAX_RANGE)
-    ->UseManualTime();
+BENCHMARK_TEMPLATE(BM_WriteDoubleColumn, CARD_MEDIUM, Encoding::PLAIN, false)->Arg(MAX_RANGE)->UseManualTime();
 
-BENCHMARK_TEMPLATE(BM_WriteDoubleColumn, CARD_WIDE, Encoding::PLAIN, false)
-    ->Arg(MAX_RANGE)
-    ->UseManualTime();
+BENCHMARK_TEMPLATE(BM_WriteDoubleColumn, CARD_WIDE, Encoding::PLAIN, false)->Arg(MAX_RANGE)->UseManualTime();
 
 // Double Split Stream Write Test
 BENCHMARK_TEMPLATE(BM_WriteDoubleColumn, CARD_NARROW, Encoding::BYTE_STREAM_SPLIT, false)
@@ -1077,28 +927,21 @@ BENCHMARK_TEMPLATE(BM_WriteDoubleColumn, CARD_WIDE, Encoding::BYTE_STREAM_SPLIT,
     ->UseManualTime();
 
 // Double Dictionary Write Test
-BENCHMARK_TEMPLATE(BM_WriteDoubleColumn, CARD_NARROW, Encoding::PLAIN, true)
-    ->Arg(MAX_RANGE)
-    ->UseManualTime();
+BENCHMARK_TEMPLATE(BM_WriteDoubleColumn, CARD_NARROW, Encoding::PLAIN, true)->Arg(MAX_RANGE)->UseManualTime();
 
-BENCHMARK_TEMPLATE(BM_WriteDoubleColumn, CARD_MEDIUM, Encoding::PLAIN, true)
-    ->Arg(MAX_RANGE)
-    ->UseManualTime();
+BENCHMARK_TEMPLATE(BM_WriteDoubleColumn, CARD_MEDIUM, Encoding::PLAIN, true)->Arg(MAX_RANGE)->UseManualTime();
 
-BENCHMARK_TEMPLATE(BM_WriteDoubleColumn, CARD_WIDE, Encoding::PLAIN, true)
-    ->Arg(MAX_RANGE)
-    ->UseManualTime();
+BENCHMARK_TEMPLATE(BM_WriteDoubleColumn, CARD_WIDE, Encoding::PLAIN, true)->Arg(MAX_RANGE)->UseManualTime();
 
 // Double Reading Test
 template <const int cardinality, Encoding::type encoding, bool use_dict>
-static void BM_ReadDoubleColumn(::benchmark::State& state) {
-  BM_ReadColumn<DoubleWriter, DoubleReader, DoubleType>(
-      state, Compression::UNCOMPRESSED, encoding, MakeDoubleInput, cardinality, use_dict,
-      DoubleSchema(Repetition::REQUIRED));
+static void BM_ReadDoubleColumn(::benchmark::State &state) {
+  BM_ReadColumn<DoubleWriter, DoubleReader, DoubleType>(state, Compression::UNCOMPRESSED, encoding, MakeDoubleInput,
+                                                        cardinality, use_dict, DoubleSchema(Repetition::REQUIRED));
 }
 
-// Double Plain Read: First argument is the input size and the second argument is read
-// size
+// Double Plain Read: First argument is the input size and the second argument
+// is read size
 BENCHMARK_TEMPLATE(BM_ReadDoubleColumn, CARD_NARROW, Encoding::PLAIN, false)
     ->Args({MAX_RANGE, MAX_RANGE})
     ->UseManualTime();
@@ -1133,3 +976,5 @@ BENCHMARK_TEMPLATE(BM_ReadDoubleColumn, CARD_WIDE, Encoding::PLAIN, true)
 
 // TODO: Byte array read/write benchmarks. Needs to handle size problem
 }  // namespace parquet
+
+BENCHMARK_MAIN();

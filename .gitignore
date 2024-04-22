@@ -35,6 +35,10 @@ build
 data
 third_party
 
+# Development files
+.cache
+.vscode
+
 # Benchmark Results
 benchmark/read_order_percentile/*.json
 benchmark/read_order_percentile/*.png

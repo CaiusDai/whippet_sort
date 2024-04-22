@@ -65,48 +65,30 @@ if(FLAVIUS_ENABLE_CCACHE
 endif()
 
 # ----------------------------------------------------------------------
-# Setup velox
-set(VELOX_ROOT ${PROJECT_SOURCE_DIR}/velox)
-message(STATUS "Setting VELOX_ROOT = ${VELOX_ROOT}")
-execute_process(
-  COMMAND
-    bash -c
-    "( source ${VELOX_ROOT}/scripts/setup-helper-functions.sh && echo -n $(get_cxx_flags $ENV{CPU_TARGET}))"
-  OUTPUT_VARIABLE SCRIPT_CXX_FLAGS
-  RESULT_VARIABLE COMMAND_STATUS)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${SCRIPT_CXX_FLAGS}")
-# minimal build for the need to test sorting
-set(VELOX_CODEGEN_SUPPORT OFF)
-set(VELOX_ENABLE_EXAMPLES OFF)
-set(VELOX_ENABLE_HDFS OFF)
-set(VELOX_ENABLE_SPARK_FUNCTIONS OFF)
-set(VELOX_ENABLE_S3 OFF)
-set(VELOX_ENABLE_PARQUET ON)
-set(VELOX_ENABLE_DUCKDB ON)
-set(VELOX_ENABLE_HIVE_CONNECTOR ON)
-set(VELOX_ENABLE_TPCH_CONNECTOR ON)
-# supress compiler warnings for velox libraries
-get_all_targets(_velox_targets ${VELOX_ROOT})
-foreach(_target IN LISTS _velox_targets)
-  if(${_target} MATCHES "^velox_")
-    message(DEBUG "subpress compiler warning for ${_target}")
-    target_compile_options(${_target} PRIVATE "-w")
-  endif()
-endforeach()
-add_subdirectory(${VELOX_ROOT})
-include_directories(${VELOX_ROOT})
-
-# ----------------------------------------------------------------------
 # dependencies
 
+include(FetchContent)
+
+# googletest
+FetchContent_Declare(googletest URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.zip)
+# For Windows: Prevent overriding the parent project's compiler/linker settings
+set(gtest_force_shared_crt
+    ON
+    CACHE BOOL "" FORCE
+)
+FetchContent_MakeAvailable(googletest)
+
+# google-benchmark
+list(APPEND CMAKE_PREFIX_PATH ${PROJECT_SOURCE_DIR}/third_party/install/google_benchmark)
+find_package(benchmark CONFIG REQUIRED)
+
 list(APPEND CMAKE_PREFIX_PATH ${PROJECT_SOURCE_DIR}/third_party/install/arrow)
-message(STATUS ${CMAKE_PREFIX_PATH})
 # arrow
 find_package(Arrow CONFIG REQUIRED)
+find_package(ArrowTesting CONFIG REQUIRED)
 # parquet
 find_package(Parquet CONFIG REQUIRED)
 
 # ----------------------------------------------------------------------
 # sources
-include_directories(${PROJECT_SOURCE_DIR}/src)
-# add_subdirectory(src)
+add_subdirectory(benchmark)
