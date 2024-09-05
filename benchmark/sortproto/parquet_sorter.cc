@@ -332,10 +332,13 @@ vector<IndexType> IndexBaseSort::merge_streams(
   return result;
 }
 
-vector<deque<IndexType>> IndexBaseSort::get_index_lists(
+vector<deque<IndexType>*> IndexBaseSort::get_index_lists(
     unique_ptr<parquet::PageReader> pager, const size_t dict_size,
     const uint32_t index_offset) {
-  vector<deque<IndexType>> result(dict_size);
+  vector<deque<IndexType>*> result(dict_size);
+  for (auto& item : result) {
+    item = new deque<IndexType>();
+  }
   shared_ptr<parquet::Page> page;  // Used for page iteration
   vector<int32_t> values;          // Temp container for index values
   values.reserve(10000);
@@ -350,7 +353,7 @@ vector<deque<IndexType>> IndexBaseSort::get_index_lists(
       values.resize(index_page->num_values());
       index_decoder->DecodeIndices(index_page->num_values(), values.data());
       for (auto& value : values) {
-        result[value].push_back(current_index);
+        result[value]->push_back(current_index);
         current_index++;
       }
     } else if (page->type() == parquet::PageType::INDEX_PAGE) {
@@ -377,22 +380,21 @@ vector<IndexBaseSort::MergeElement> IndexBaseSort::sort_chunk(
   }
   auto dict_page =
       std::static_pointer_cast<parquet::DictionaryPage>(first_page);
-  int32_t num_values = dict_page->num_values();
+  int32_t dict_count = dict_page->num_values();
   if (type == parquet::Type::INT64) {
     auto decoder =
         parquet::MakeTypedDecoder<parquet::Int64Type>(parquet::Encoding::PLAIN);
-    decoder->SetData(dict_page->num_values(), dict_page->data(),
-                     dict_page->size());
-    vector<int64_t> dict(num_values);
-    decoder->Decode(&dict[0], num_values);
+    decoder->SetData(dict_count, dict_page->data(), dict_page->size());
+    vector<int64_t> dict(dict_count);
+    decoder->Decode(&dict[0], dict_count);
     auto count_future =
         std::async(std::launch::async, IndexBaseSort::get_index_lists,
-                   std::move(column_pager), num_values, index_offset);
+                   std::move(column_pager), dict_count, index_offset);
     // Local Dict sorting.
     // pair.first is the dictionary key
     // pair.second is the original index
-    vector<pair<int64_t, int>> pairs(num_values);
-    for (int i = 0; i < num_values; ++i) {
+    vector<pair<int64_t, int>> pairs(dict_count);
+    for (int i = 0; i < dict_count; ++i) {
       pairs[i].first = dict[i];
       pairs[i].second = i;
     }
@@ -404,9 +406,9 @@ vector<IndexBaseSort::MergeElement> IndexBaseSort::sort_chunk(
     auto index_count = std::move(count_future.get());
     // Get result
     vector<MergeElement> result;
-    result.reserve(num_values);
-    for (int i = 0; i < num_values; i++) {
-      result.emplace_back(pairs[i].first, &(index_count[pairs[i].second]));
+    result.reserve(dict_count);
+    for (int i = 0; i < dict_count; i++) {
+      result.emplace_back(pairs[i].first, index_count[pairs[i].second]);
     }
 
     return result;
@@ -462,16 +464,17 @@ shared_ptr<ParquetSorter> ParquetSorter::create(
   }
   return sorter;
 }
+
 arrow::Status ParquetSorter::write(vector<uint32_t>&& index_list) {
   // Read the entire input file into an Arrow table
-  ARROW_ASSIGN_OR_RAISE(auto infile,
+  std::shared_ptr<arrow::io::RandomAccessFile> infile;
+  ARROW_ASSIGN_OR_RAISE(infile,
                         arrow::io::ReadableFile::Open(this->input_file));
   unique_ptr<parquet::arrow::FileReader> reader;
-  // PARQUET_THROW_NOT_OK(
-  //     parquet::arrow::OpenFile(infile, arrow::default_memory_pool(),
-  //     &reader));
-  PARQUET_THROW_NOT_OK(parquet::arrow::FileReader::Make(
-      arrow::default_memory_pool(), std::move(this->file_reader), &reader));
+  PARQUET_THROW_NOT_OK(
+      parquet::arrow::OpenFile(infile, arrow::default_memory_pool(), &reader));
+  // PARQUET_THROW_NOT_OK(parquet::arrow::FileReader::Make(
+  //     arrow::default_memory_pool(), std::move(this->file_reader), &reader));
 
   shared_ptr<arrow::Table> parquet_table;
   // Read the table.
@@ -481,7 +484,7 @@ arrow::Status ParquetSorter::write(vector<uint32_t>&& index_list) {
   shared_ptr<arrow::Buffer> index_buffer =
       arrow::Buffer::FromVector(std::move(index_list));
   auto index_array =
-      std::make_shared<arrow::UInt32Array>(index_list.size(), index_buffer);
+      std::make_shared<arrow::UInt32Array>(index_size, index_buffer);
 
   // Transform the table using the index
   arrow::compute::TakeOptions options;
@@ -489,14 +492,14 @@ arrow::Status ParquetSorter::write(vector<uint32_t>&& index_list) {
   arrow::Datum result;
   ARROW_ASSIGN_OR_RAISE(result, arrow::compute::Take(parquet_table, index_array,
                                                      options, &context));
-
   shared_ptr<arrow::Table> sorted_table = result.table();
 
   // Write to Parquet Table
-  ARROW_ASSIGN_OR_RAISE(auto outfile,
+  std::shared_ptr<arrow::io::FileOutputStream> outfile;
+  ARROW_ASSIGN_OR_RAISE(outfile,
                         arrow::io::FileOutputStream::Open(this->output_file));
   PARQUET_THROW_NOT_OK(parquet::arrow::WriteTable(
-      *sorted_table, arrow::default_memory_pool(), outfile));
+      *sorted_table.get(), arrow::default_memory_pool(), outfile));
 
   // Close the writer
   PARQUET_THROW_NOT_OK(outfile->Close());

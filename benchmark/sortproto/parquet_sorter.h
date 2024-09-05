@@ -138,7 +138,7 @@ class IndexBaseSort : public SortStrategy {
    * @param dict_size: The size of the dictionary
    * @param index_offset: The offset of the index in the global layout.
    */
-  static vector<deque<IndexType>> get_index_lists(
+  static vector<deque<IndexType>*> get_index_lists(
       unique_ptr<parquet::PageReader> pager, const size_t dict_size,
       const uint32_t index_offset);
 
