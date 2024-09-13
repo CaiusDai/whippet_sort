@@ -41,9 +41,16 @@ class CountBaseSort : public SortStrategy {
  public:
   class MergeElement {
    public:
-    MergeElement(int64_t key, uint64_t count) : key(key), count(count) {};
+    MergeElement(int64_t key, uint64_t count, uint32_t row_group_index,
+                 uint32_t dict_index)
+        : key(key),
+          count(count),
+          row_group_index(row_group_index),
+          dict_index(dict_index) {};
     int64_t key;
     uint64_t count;
+    uint32_t row_group_index;
+    uint32_t dict_index;
   };
 
   vector<IndexType> sort_column(parquet::ParquetFileReader* file_reader,
@@ -53,12 +60,26 @@ class CountBaseSort : public SortStrategy {
   // Following private static functions are declared here for logical grouping
   // and readability
  private:
+  void set_global_index_for_chunk(IndexType* offset, int rg_idx,
+                                  uint32_t col_idx,
+                                  vector<IndexType>& global_index,
+                                  shared_ptr<parquet::PageReader> reader);
   /**
    * @brief Sort a column chunk and return the sorted MergeElement list.
-   * Result is then be used for merging.
+   * Result is then be used for merging. During this process, dictionary count
+   * will be updated.
    */
-  static vector<MergeElement> sort_chunk(
-      shared_ptr<parquet::RowGroupReader> row_gp_reader, uint32_t col_idx);
+  vector<MergeElement> sort_chunk(
+      shared_ptr<parquet::RowGroupReader> row_gp_reader, uint32_t col_idx,
+      uint32_t row_group_index);
+  /**
+   * @brief: Helper function of CountBaseSort::sort_column. This function will
+   * transfer a list of sorted <key,count> pairs into a key -> offset mapping.
+   * This function will be used after merging process. Having this mapping we
+   * can then produce a global index list by reiterate the sorting column.
+   */
+  IndexType** get_offset_mapping(
+      vector<CountBaseSort::MergeElement>&& index_list, uint32_t num_rg);
   /**
    * @brief Count the appearance of each element in the dictionary within a
    * chunk. Currently only supports INT64 type.
@@ -71,14 +92,11 @@ class CountBaseSort : public SortStrategy {
   static vector<MergeElement> merge_streams(
       const vector<vector<MergeElement>>& streams);
 
-  /**
-   * @brief: Helper function of CountBaseSort::sort_column. This function will
-   * transfer a list of sorted <key,count> pairs into a key -> offset mapping.
-   * This function will be used after merging process. Having this mapping we
-   * can then produce a global index list by reiterate the sorting column.
-   */
-  static unordered_map<int64_t, IndexType> get_offset_mapping(
-      vector<CountBaseSort::MergeElement>&& index_list);
+ private:
+  // How many elements are there in the each RowGroups Dictionary.
+  vector<uint32_t> dict_value_counts;
+  // Used by multi-threading version of global_index genration
+  vector<IndexType> index_offset;
 };
 
 class IndexBaseSort : public SortStrategy {

@@ -44,6 +44,38 @@ string ParquetPageTypeToString(parquet::PageType::type type) {
   }
 }
 
+void CountBaseSort::set_global_index_for_chunk(
+    IndexType* offset, int rg_idx, uint32_t col_idx,
+    vector<IndexType>& global_index, shared_ptr<parquet::PageReader> reader) {
+  // Iterate through pages to place the position into the result
+  // Skip first page
+  IndexType current_index = this->index_offset[rg_idx];
+  shared_ptr<parquet::Page> page = reader->NextPage();
+  vector<int32_t> values;  // Temp container for index decoding
+  auto index_decoder = parquet::MakeDictDecoder<parquet::Int64Type>();
+  while (page = reader->NextPage(), page != nullptr) {
+    if (page->type() == parquet::PageType::DATA_PAGE) {
+      auto index_page = std::static_pointer_cast<parquet::DataPage>(page);
+      index_decoder->SetData(static_cast<int>(index_page->num_values()),
+                             index_page->data(), index_page->size());
+      values.resize(index_page->num_values());
+      index_decoder->DecodeIndices(index_page->num_values(), values.data());
+      for (auto& dict_idx : values) {
+        global_index[offset[dict_idx]] = current_index;
+        offset[dict_idx]++;
+        current_index++;
+      }
+    } else if (page->type() == parquet::PageType::INDEX_PAGE) {
+      // Skip Index page for now. Can be used to optimize
+      continue;
+    } else {
+      string page_type = ParquetPageTypeToString(page->type());
+      throw std::runtime_error(
+          "Unexpected page type. Expecting: IndexPage. Met: " + page_type);
+    }
+  }  // End of page iteration within Chunk
+}
+
 vector<IndexType> CountBaseSort::sort_column(
     parquet::ParquetFileReader* file_reader,
     shared_ptr<parquet::FileMetaData> metadata, uint32_t col_idx) {
@@ -54,11 +86,19 @@ vector<IndexType> CountBaseSort::sort_column(
   }
   // Use multithreading to accumulate chunk sorting results
   auto num_rg = metadata->num_row_groups();
+  this->dict_value_counts.resize(num_rg);
+  this->index_offset.resize(num_rg);
   vector<future<vector<MergeElement>>> futures(num_rg);
   for (size_t i = 0; i < num_rg; i++) {
     // Launch a thread to do sorting
     futures[i] = std::async(std::launch::async, &CountBaseSort::sort_chunk,
-                            file_reader->RowGroup(i), col_idx);
+                            this, file_reader->RowGroup(i), col_idx, i);
+  }
+  // Count the index offset
+  int current_offset = 0;
+  for (int i = 0; i < num_rg; i++) {
+    this->index_offset[i] = current_offset;
+    current_offset += metadata->RowGroup(i)->num_rows();
   }
   // Wait for all threads to finish
   vector<vector<MergeElement>> streams;
@@ -69,27 +109,25 @@ vector<IndexType> CountBaseSort::sort_column(
   // Merge the results from different streams
   auto merge_result = merge_streams(streams);
   // Construct a Index Mapping based on counting results.
-  auto offset_map = get_offset_mapping(std::move(merge_result));
+  auto offset_map = get_offset_mapping(std::move(merge_result), num_rg);
   // Re-iterate the column to get the final index list
   int num_rows = metadata->num_rows();
-  IndexType current_offset = 0;
+  size_t current_index = 0;
   vector<IndexType> result(num_rows);
-  for (int i = 0; i < metadata->num_row_groups(); ++i) {
+  vector<std::future<void>> threads(num_rg);
+  for (int rg_idx = 0; rg_idx < num_rg; ++rg_idx) {
+    IndexType* offset = offset_map[rg_idx];
+    // Use multi-threading to update global index
+    // threads[rg_idx] = std::async(
+    //     std::launch::async, &CountBaseSort::set_global_index_for_chunk, this,
+    //     offset, rg_idx, col_idx, std::ref(result),
+    //     file_reader->RowGroup(rg_idx)->GetColumnPageReader(col_idx));
     // Get Dictionary Page
-    auto row_group = file_reader->RowGroup(i);
+    auto row_group = file_reader->RowGroup(rg_idx);
     auto column_pager = row_group->GetColumnPageReader(col_idx);
-    shared_ptr<parquet::Page> first_page = column_pager->NextPage();
-    auto dict_page =
-        std::static_pointer_cast<parquet::DictionaryPage>(first_page);
-    int32_t num_values = dict_page->num_values();
-    auto decoder =
-        parquet::MakeTypedDecoder<parquet::Int64Type>(parquet::Encoding::PLAIN);
-    decoder->SetData(dict_page->num_values(), dict_page->data(),
-                     dict_page->size());
-    vector<int64_t> dict(num_values);
-    decoder->Decode(&dict[0], num_values);
     // Iterate through pages to place the position into the result
-    shared_ptr<parquet::Page> page;
+    // Skip first page
+    shared_ptr<parquet::Page> page = column_pager->NextPage();
     vector<int32_t> values;  // Temp container for index decoding
     auto index_decoder = parquet::MakeDictDecoder<parquet::Int64Type>();
     while (page = column_pager->NextPage(), page != nullptr) {
@@ -99,10 +137,10 @@ vector<IndexType> CountBaseSort::sort_column(
                                index_page->data(), index_page->size());
         values.resize(index_page->num_values());
         index_decoder->DecodeIndices(index_page->num_values(), values.data());
-        for (auto& value : values) {
-          result[offset_map[dict[value]]] = current_offset;
-          offset_map[dict[value]]++;
-          current_offset++;
+        for (auto& dict_idx : values) {
+          result[offset[dict_idx]] = current_index;
+          offset[dict_idx]++;
+          current_index++;
         }
       } else if (page->type() == parquet::PageType::INDEX_PAGE) {
         // Skip Index page for now. Can be used to optimize
@@ -114,6 +152,15 @@ vector<IndexType> CountBaseSort::sort_column(
       }
     }  // End of page iteration within Chunk
   }  // End of RowGroup iteration
+  //// Wait threads to finish
+  // for (auto& thread : threads) {
+  //   thread.get();
+  // }
+  // Free offset_map
+  for (int i = 0; i < metadata->num_row_groups(); i++) {
+    delete[] offset_map[i];
+  }
+  delete[] offset_map;
   return result;
 }
 
@@ -152,11 +199,7 @@ vector<CountBaseSort::MergeElement> CountBaseSort::merge_streams(
   while (!minHeap.empty()) {
     auto minStream = minHeap.top();
     minHeap.pop();
-    if (result.empty() || result.back().key != minStream.first->key) {
-      result.push_back(*minStream.first);
-    } else {
-      result.back().count += minStream.first->count;
-    }
+    result.push_back(*minStream.first);
     ++minStream.first;  // Move to the next element in this stream
     if (minStream.first != minStream.second) {
       minHeap.push(minStream);  // Push back the updated pair if not at end
@@ -165,19 +208,27 @@ vector<CountBaseSort::MergeElement> CountBaseSort::merge_streams(
   return result;
 }
 
-unordered_map<int64_t, IndexType> CountBaseSort::get_offset_mapping(
-    vector<CountBaseSort::MergeElement>&& index_list) {
-  unordered_map<int64_t, IndexType> result;
-  IndexType offset = 0;
-  for (const auto& element : index_list) {
-    result[element.key] = offset;
-    offset += element.count;
+IndexType** CountBaseSort::get_offset_mapping(
+    vector<CountBaseSort::MergeElement>&& index_list, uint32_t num_rg) {
+  // index_list.size() := Num of RowGroups
+  IndexType** offset_mapping = new IndexType*[num_rg];
+  uint64_t current_offset = 0;
+  // Iterate through RowGroups
+  for (int i = 0; i < num_rg; i++) {
+    offset_mapping[i] = new IndexType[dict_value_counts[i]];
   }
-  return result;
+  // Iterate through the index lists
+  for (auto& element : index_list) {
+    offset_mapping[element.row_group_index][element.dict_index] =
+        current_offset;
+    current_offset += element.count;
+  }
+  return offset_mapping;
 }
 
 vector<CountBaseSort::MergeElement> CountBaseSort::sort_chunk(
-    shared_ptr<parquet::RowGroupReader> row_gp_reader, uint32_t col_idx) {
+    shared_ptr<parquet::RowGroupReader> row_gp_reader, uint32_t col_idx,
+    uint32_t row_group_index) {
   auto column_pager = row_gp_reader->GetColumnPageReader(col_idx);
   auto column_meta = row_gp_reader->metadata()->ColumnChunk(col_idx);
   auto type = column_meta->type();
@@ -187,23 +238,24 @@ vector<CountBaseSort::MergeElement> CountBaseSort::sort_chunk(
   }
   auto dict_page =
       std::static_pointer_cast<parquet::DictionaryPage>(first_page);
-  int32_t num_values = dict_page->num_values();
+  int32_t num_dict_values = dict_page->num_values();
+  this->dict_value_counts[row_group_index] = num_dict_values;
   if (type == parquet::Type::INT64) {
     auto decoder =
         parquet::MakeTypedDecoder<parquet::Int64Type>(parquet::Encoding::PLAIN);
     decoder->SetData(dict_page->num_values(), dict_page->data(),
                      dict_page->size());
-    vector<int64_t> dict(num_values);
-    decoder->Decode(&dict[0], num_values);
+    vector<int64_t> dict(num_dict_values);
+    decoder->Decode(&dict[0], num_dict_values);
     auto count_future = std::async(std::launch::async, count_elements,
-                                   std::move(column_pager), num_values);
+                                   std::move(column_pager), num_dict_values);
     // Local Dict sorting. (Can use SIMD bitonic to accelerate)
     // Here we use result vector to record index first, then store the count
     // from count_values function. By doing so we can save one copy step.
     vector<CountBaseSort::MergeElement> result;
-    result.reserve(num_values);
-    for (int i = 0; i < num_values; ++i) {
-      result.emplace_back(dict[i], i);
+    result.reserve(num_dict_values);
+    for (int i = 0; i < num_dict_values; ++i) {
+      result.emplace_back(dict[i], 0, row_group_index, i);
     }
     std::sort(result.begin(), result.end(),
               [](const auto& a, const auto& b) { return a.key < b.key; });
@@ -213,8 +265,8 @@ vector<CountBaseSort::MergeElement> CountBaseSort::sort_chunk(
     // Get count values, store them into the result vector.
     // Note that after sorting the result[i].count is the original index for
     // that element.
-    for (int i = 0; i < num_values; i++) {
-      result[i].count = count_vector[result[i].count];
+    for (int i = 0; i < num_dict_values; i++) {
+      result[i].count = count_vector[result[i].dict_index];
     }
     return result;
   } else {

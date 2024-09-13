@@ -190,29 +190,107 @@ bool is_sorted_column(const std::string& parquet_file,
   return true;
 }
 
+bool check_encoding_consistency(const string& input_file,
+                                parquet::Encoding::type encoding,
+                                const size_t col_index) {
+  // Open the input file
+  PARQUET_ASSIGN_OR_THROW(auto infile,
+                          arrow::io::ReadableFile::Open(input_file));
+
+  // Create a ParquetFileReader
+  std::unique_ptr<parquet::ParquetFileReader> reader =
+      parquet::ParquetFileReader::Open(infile);
+  auto meta = reader->metadata();
+  std::cout << "There are " << meta->num_row_groups() << " row groups"
+            << std::endl;
+  uint64_t num_page_processed = 0;
+  // Iterate through row groups and check each column's encoding
+  for (int i = 0; i < meta->num_row_groups(); i++) {
+    auto row_group_reader = reader->RowGroup(i);
+    auto page_reader = row_group_reader->GetColumnPageReader(col_index);
+    std::shared_ptr<parquet::Page> page;
+    while (page = page_reader->NextPage(), page != nullptr) {
+      if (page->type() == parquet::PageType::DATA_PAGE ||
+          page->type() == parquet::PageType::DATA_PAGE_V2) {
+        auto data_page = std::static_pointer_cast<parquet::DataPage>(page);
+        if (data_page->encoding() != encoding) {
+          std::cerr << "Encoding mismatch at row group " << i << std::endl;
+          return false;
+        }
+      }
+      num_page_processed++;
+    }
+  }
+  std::cout << "Processed in total " << num_page_processed << " pages"
+            << std::endl;
+  return true;
+}
+
+void report_meta(const string& input_file) {
+  // Open the input file
+  PARQUET_ASSIGN_OR_THROW(auto infile,
+                          arrow::io::ReadableFile::Open(input_file));
+
+  // Create a ParquetFileReader
+  std::unique_ptr<parquet::ParquetFileReader> reader =
+      parquet::ParquetFileReader::Open(infile);
+  auto meta = reader->metadata();
+  std::cout << "Summarizing metadata for file " << input_file << std::endl;
+  std::cout << "There are " << meta->num_columns() << " columns" << std::endl;
+  std::cout << "There are " << meta->num_row_groups() << " row groups"
+            << std::endl;
+  auto schema = meta->schema();
+  // Report encodings for each column
+  for (int i = 0; i < meta->num_columns(); i++) {
+    auto column_type_str =
+        parquet::TypeToString(schema->Column(i)->physical_type());
+    std::cout << "Column " << i << " has type " << column_type_str << std::endl;
+    std::unordered_set<parquet::Encoding::type> encodings;
+    for (int j = 0; j < meta->num_row_groups(); j++) {
+      auto row_group_reader = reader->RowGroup(j);
+      auto page_reader = row_group_reader->GetColumnPageReader(i);
+      std::shared_ptr<parquet::Page> page;
+      while (page = page_reader->NextPage(), page != nullptr) {
+        if (page->type() == parquet::PageType::DATA_PAGE ||
+            page->type() == parquet::PageType::DATA_PAGE_V2) {
+          auto data_page = std::static_pointer_cast<parquet::DataPage>(page);
+          encodings.insert(data_page->encoding());
+        }
+      }
+    }
+    std::cout << "Column " << i << " has encodings: \n";
+    for (auto& encoding : encodings) {
+      auto encoding_str = parquet::EncodingToString(encoding);
+      std::cout << " - " << encoding_str << " \n";
+    }
+  }
+}
+
 int main(const int argc, const char* argv[]) {
   nice(-20);
-  int num_runs = 20;
   auto input_file = std::string(argv[1]);
+  int num_runs = std::stoi(argv[2]);
   // Report the number of row groups and number of Rows
-  auto sorter = whippet_sort::ParquetSorter::create(
-      input_file, "output_file",
-      whippet_sort::SortStrategy::SortType::COUNT_BASE);
-  std::cout << "Number of RowGroups: "
-            << sorter->file_reader->metadata()->num_row_groups() << std::endl;
-  std::cout << "Number of Rows: " << sorter->file_reader->metadata()->num_rows()
-            << std::endl;
+  // auto sorter = whippet_sort::ParquetSorter::create(
+  //     input_file, "output_file",
+  //     whippet_sort::SortStrategy::SortType::COUNT_BASE);
+  // std::cout << "Number of RowGroups: "
+  //           << sorter->file_reader->metadata()->num_row_groups() <<
+  //           std::endl;
+  // std::cout << "Number of Rows: " <<
+  // sorter->file_reader->metadata()->num_rows()
+  //           << std::endl;
 
   // Benchmark Arrow sorting
-  auto [arrow_median, arrow_average] = benchmark(
-      [&]() {
-        drop_file_cache(input_file);
-        PARQUET_THROW_NOT_OK(arrow_sorting(input_file, _ARROW_OUT));
-      },
-      num_runs);
+  // auto [arrow_median, arrow_average] = benchmark(
+  //     [&]() {
+  //       drop_file_cache(input_file);
+  //       PARQUET_THROW_NOT_OK(arrow_sorting(input_file, _ARROW_OUT));
+  //     },
+  //     num_runs);
 
-  std::cout << "Arrow sorting - Median: " << arrow_median
-            << "ms, Average: " << arrow_average << "ms" << std::endl;
+  // std::cout << "Arrow sorting - Median: " << arrow_median
+  //           << "ms, Average: " << arrow_average << "ms" << std::endl;
 
   // Benchmark Whippet sorting(CountBaseSort)
   auto [whippet_count_median, whippet_count_average] = benchmark(
@@ -228,24 +306,25 @@ int main(const int argc, const char* argv[]) {
             << "ms" << std::endl;
 
   // Benchmark Whippet sorting (IndexBaseSort)
-  auto [whippet_index_median, whippet_index_average] = benchmark(
-      [&]() {
-        drop_file_cache(input_file);
-        whippet_sorting(input_file, _WHIPPET_INDEX_OUT,
-                        whippet_sort::SortStrategy::SortType::INDEX_BASE);
-      },
-      num_runs);
+  // auto [whippet_index_median, whippet_index_average] = benchmark(
+  //     [&]() {
+  //       drop_file_cache(input_file);
+  //       whippet_sorting(input_file, _WHIPPET_INDEX_OUT,
+  //                       whippet_sort::SortStrategy::SortType::INDEX_BASE);
+  //     },
+  //     num_runs);
 
-  std::cout << "Whippet sorting (IndexBaseSort) - Median: "
-            << whippet_index_median << "ms, Average: " << whippet_index_average
-            << "ms" << std::endl;
+  // std::cout << "Whippet sorting (IndexBaseSort) - Median: "
+  //           << whippet_index_median << "ms, Average: " <<
+  //           whippet_index_average
+  //           << "ms" << std::endl;
 
   // Check correctness
-  bool count_correct = is_sorted_column(_WHIPPET_COUNT_OUT, 0);
-  std::cout << "Count Base Whippet sort correctness: "
-            << (count_correct ? "Correct" : "Incorrect") << std::endl;
-  bool index_correct = is_sorted_column(_WHIPPET_INDEX_OUT, 0);
-  std::cout << "Index Base Whippet sort correctness: "
-            << (index_correct ? "Correct" : "Incorrect") << std::endl;
+  // bool count_correct = is_sorted_column(_WHIPPET_COUNT_OUT, 0);
+  // std::cout << "Count Base Whippet sort correctness: "
+  //           << (count_correct ? "Correct" : "Incorrect") << std::endl;
+  // bool index_correct = is_sorted_column(_WHIPPET_INDEX_OUT, 0);
+  // std::cout << "Index Base Whippet sort correctness: "
+  //           << (index_correct ? "Correct" : "Incorrect") << std::endl;
   return 0;
 }
