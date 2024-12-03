@@ -156,7 +156,7 @@ TEST_F(ColumnTest, TwoRoundSimpleSorting) {
   ASSERT_TRUE(is_sorted_by_columns(cols, state.indices));
   Column second_round = Column::stitch({&raw_col3}, state.indices);
   second_round.sort(state.groups);
-  state = second_round.get_groups_and_index();
+  state = second_round.get_groups_and_index(state.groups);
   ASSERT_TRUE(is_sorted_by_columns({&raw_col3}, state.indices));
 }
 
@@ -183,7 +183,7 @@ TEST_F(ColumnTest, TwoRoundSimpleSortingDup) {
   ASSERT_TRUE(state.indices.size() == 6);
   Column second_round = Column::stitch({&raw_col3}, state.indices);
   second_round.sort(state.groups);
-  state = second_round.get_groups_and_index();
+  state = second_round.get_groups_and_index(state.groups);
   ASSERT_TRUE(
       is_sorted_by_columns({&raw_col1, &raw_col2, &raw_col3}, state.indices));
 }
@@ -229,7 +229,7 @@ TEST_F(ColumnTest, TwoRoundLargeRandomInput) {
   ASSERT_LT(state.groups.size(), num_rows);
   Column snd = Column::stitch(sndRaw, state.indices);
   snd.sort(state.groups);
-  state = snd.get_groups_and_index();
+  state = snd.get_groups_and_index(state.groups);
   fstRaw.push_back(sndRaw[0]);
   fstRaw.push_back(sndRaw[1]);
   ASSERT_TRUE(is_sorted_by_columns(fstRaw, state.indices));

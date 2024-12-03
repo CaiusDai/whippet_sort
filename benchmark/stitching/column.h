@@ -28,6 +28,7 @@ struct SortingState {
   vector<SortingGroup> groups;
   vector<uint32_t> indices;  // permutation from first phase
 };
+
 template <size_t WIDTH>
 struct Tuple {
   uint32_t rowID;
@@ -41,7 +42,8 @@ typedef Tuple<4> Tuple4;
 
 class Column {
  public:
-  Column() : data(nullptr), num_values(0), compare_factor(1) {}
+  Column()
+      : data(nullptr), num_values(0), compare_factor(1), record_groups(false) {}
   ~Column() {
     if (data != nullptr) {
       delete[] data;
@@ -49,7 +51,9 @@ class Column {
   }
 
   Column(const Column& other)
-      : num_values(other.num_values), compare_factor(other.compare_factor) {
+      : num_values(other.num_values),
+        compare_factor(other.compare_factor),
+        record_groups(other.record_groups) {
     if (other.data != nullptr) {
       const size_t total_size = num_values * (compare_factor + 1);
       data = new uint32_t[total_size];
@@ -64,6 +68,7 @@ class Column {
       if (data != nullptr) delete[] data;
       num_values = other.num_values;
       compare_factor = other.compare_factor;
+      record_groups = other.record_groups;
       if (other.data != nullptr) {
         const size_t total_size = num_values * (compare_factor + 1);
         data = new uint32_t[total_size];
@@ -78,7 +83,8 @@ class Column {
   Column(Column&& other) noexcept
       : data(other.data),
         num_values(other.num_values),
-        compare_factor(other.compare_factor) {
+        compare_factor(other.compare_factor),
+        record_groups(other.record_groups) {
     other.data = nullptr;
     other.num_values = 0;
     other.compare_factor = 1;
@@ -90,6 +96,7 @@ class Column {
       data = other.data;
       num_values = other.num_values;
       compare_factor = other.compare_factor;
+      record_groups = other.record_groups;
       other.data = nullptr;
       other.num_values = 0;
       other.compare_factor = 1;
@@ -154,6 +161,40 @@ class Column {
     }
     state.indices[num_values - 1] = curr_tuple[0];
     state.groups.push_back({start, num_values - start});
+    return state;
+  }
+
+  SortingState get_groups_and_index(vector<SortingGroup>& group) const {
+    SortingState state;
+    state.indices.resize(num_values);
+    size_t start = 0;
+    uint32_t* curr_tuple = data;
+    const uint32_t tuple_offset = compare_factor + 1;
+    for (size_t group_idx = 0; group_idx < group.size(); group_idx++) {
+      if (group[group_idx].length == 1) {
+        state.indices[start] = curr_tuple[0];
+        state.groups.push_back({start, 1});
+        start++;
+        curr_tuple += tuple_offset;
+        continue;
+      } else {
+        for (size_t base = start;
+             base < group[group_idx].start_idx + group[group_idx].length;
+             base++) {
+          state.indices[base] = curr_tuple[0];
+          if (memcmp(curr_tuple + 1, curr_tuple + tuple_offset + 1,
+                     compare_factor * sizeof(uint32_t)) != 0) {
+            state.groups.push_back({start, base - start + 1});
+            start = base + 1;
+          }
+          curr_tuple += tuple_offset;
+          if (base == start + group[group_idx].length - 1) {
+            state.groups.push_back({start, base - start + 1});
+            state.indices[base] = curr_tuple[0];
+          }
+        }
+      }
+    }
     return state;
   }
 
@@ -231,6 +272,7 @@ class Column {
 
   // fields:
   uint32_t* data;
+  bool record_groups = false;
   size_t num_values;
   size_t compare_factor;  // Draft use only
 };
